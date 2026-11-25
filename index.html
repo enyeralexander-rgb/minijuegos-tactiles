@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Minijuegos de activación de marca · Alexander Urbaneja</title>
+<style>
+  :root{color-scheme:dark;--fondo:#16161e;--tarjeta:#22222e;--borde:#34344a;--texto:#eceef4;--suave:#a3a6b8;--acento:#7aa2ff}
+  *{box-sizing:border-box}
+  body{margin:0;font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;background:var(--fondo);color:var(--texto);line-height:1.5}
+  main{max-width:960px;margin:0 auto;padding:56px 24px}
+  h1{font-size:clamp(28px,4vw,40px);margin:0 0 8px}
+  p.intro{color:var(--suave);max-width:640px;margin:0 0 40px}
+  ul{list-style:none;padding:0;margin:0;display:grid;gap:16px;grid-template-columns:repeat(auto-fit,minmax(260px,1fr))}
+  a{display:block;height:100%;padding:24px;border:1px solid var(--borde);border-radius:14px;background:var(--tarjeta);color:inherit;text-decoration:none;transition:border-color .15s,transform .15s}
+  a:hover,a:focus-visible{border-color:var(--acento);transform:translateY(-2px);outline:none}
+  h2{margin:0 0 6px;font-size:20px}
+  a p{margin:0;color:var(--suave);font-size:15px}
+  footer{margin-top:48px;color:var(--suave);font-size:14px}
+</style>
+</head>
+<body>
+<main>
+  <h1>Minijuegos de activación de marca</h1>
+  <p class="intro">Maquetas jugables de tres juegos para pantallas táctiles, pensados para activaciones en punto de venta. Funcionan en vertical (1080×1920) y horizontal (1920×1080), sin servidor ni dependencias.</p>
+  <ul>
+    <li><a href="memoria/"><h2>Memoria</h2><p>Encuentra las 8 parejas antes de cometer 3 errores.</p></a></li>
+    <li><a href="rompecabezas/"><h2>Rompecabezas</h2><p>Coloca las 16 piezas en menos de 60 segundos.</p></a></li>
+    <li><a href="sopa-de-letras/"><h2>Sopa de letras</h2><p>Encuentra las palabras ocultas en la cuadrícula.</p></a></li>
+  </ul>
+  <footer>Alexander Urbaneja · Desarrollador Full Stack</footer>
+</main>
+</body>
+</html>

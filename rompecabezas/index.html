@@ -1,0 +1,1082 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no">
+<title>Rompecabezas Baby Finger</title>
+<!--
+  Maqueta del rompecabezas de Baby Finger (sprint B5), cuarta dinámica de la marca, en un ambiente propio «en la
+  playa» que une el cielo del parque con el agua del mar. Solo sirve para aprobar aspecto, sonido y sensación antes
+  de construirlo en libGDX.
+
+  Igual que la sopa y las memorias: todo se dibuja en un solo lienzo con lo que tiene libGDX (imágenes o recortes de
+  imagen, formas llenas, líneas, curvas, texto con borde, transparencia, giro y escala). La lámina (imagen sobre su
+  fondo), cada pieza recortada, su relieve y su sombra se "hornean" una vez por partida en imágenes aparte (en nativo,
+  texturas hechas con un Pixmap y una máscara); en cada cuadro solo se pegan, se giran y se escalan.
+  La forma de las piezas sigue la curva del generador de Draradech (CC0). Las reglas están en logica.js
+  (se prueban con node pruebas.mjs).
+
+  Parámetros: ?o=v o ?o=h fuerzan la orientación, ?semilla=123 repite las partidas, ?imagen=panalG (u otra) fija la
+  imagen de la primera partida, ?musica=0 quita la música, ?musica=sintetizada usa la base hecha por código,
+  ?depurar=1 activa teclas (1 o F coloca una pieza, E error, G gana,
+  P pierde por tiempo, R pierde por errores, T deja 12 s, V salta la vista previa).
+-->
+<style>
+@font-face{font-family:'Fredoka';src:url(fuentes/Fredoka-Bold.ttf) format('truetype');font-weight:700;font-display:block}
+@font-face{font-family:'Fredoka';src:url(fuentes/Fredoka-SemiBold.ttf) format('truetype');font-weight:600;font-display:block}
+html,body{margin:0;height:100%;overflow:hidden;background:#5cc0ee;touch-action:none;user-select:none;-webkit-user-select:none;-webkit-tap-highlight-color:transparent}
+#lienzo{position:absolute;display:block;touch-action:none;cursor:pointer}
+</style>
+</head>
+<body>
+<canvas id="lienzo"></canvas>
+<script src="logica.js"></script>
+<script>
+'use strict';
+(() => {
+const PARAMS = new URLSearchParams(location.search);
+const EMB = window.__ROMPE_EMB || null;              // en el archivo compartible todo viene incrustado
+const recurso = n => (EMB && EMB[n]) ? EMB[n] : n;
+const LG = window.RompecabezasLogica;
+
+/* ======================= Reglas y tiempos ======================= */
+const PIEZAS = LG.PIEZAS, N = LG.COLS, ERRORES_MAX = LG.ERRORES_MAX, TIEMPO = LG.TIEMPO;
+const VISTA = 3, INACTIVIDAD = 45, ABANDONO = 90, GUARDA_RESULTADO = 1.2;
+const LADO = 640, LADO_DEMO = 480;                   // tablero de juego y de la demostración (unidades de 1080p)
+const FORZADA = LG.IMAGENES.includes(PARAMS.get('imagen')) ? PARAMS.get('imagen') : null;
+
+/* Colores de la marca (los mismos de la sopa y las memorias) */
+const C = { rojo: '#DC1C26', rojoOsc: '#A0121A', azul: '#00348A', azulOsc: '#00225C', blanco: '#FFFFFF',
+  tinta: '#0B2A66', gris: '#C5D0DF', oro: '#FFC93C', verde: '#22A356' };
+const ELOGIOS = ['¡Muy bien!', '¡Genial!', '¡Excelente!', '¡Bien hecho!', '¡Súper!', '¡Eso es!', '¡Perfecto!'];
+const SUB = 'en la playa', COLOR_SUB = '#0E86C8';
+
+/* ======================= Azar con semilla ======================= */
+let semilla = PARAMS.has('semilla') ? Number(PARAMS.get('semilla')) >>> 0 : (Math.random() * 1e9) >>> 0;
+const FIJA = PARAMS.has('semilla');   // con ?semilla las partidas se repiten en el mismo orden
+const nuevaSemilla = () => { semilla = (semilla * 1103515245 + 12345 + (FIJA ? 0 : (Math.random() * 1e6) | 0)) >>> 0; return semilla; };
+const mulberry32 = LG.mulberry32;
+
+/* ======================= Escenario fijo y orientación ======================= */
+const lienzo = document.getElementById('lienzo'), ctx = lienzo.getContext('2d');
+let O = 'v', W = 1080, H = 1920, escala = 1, px = 1;      // px: píxeles reales por unidad del escenario
+function orientacionDeseada() { const f = PARAMS.get('o'); if (f === 'v' || f === 'h') return f; return innerHeight >= innerWidth ? 'v' : 'h'; }
+
+/* Distribución (unidades de 1080p). Vertical: reloj, vidas, tablero y bandeja arriba; marca y bebé abajo (D-013).
+   Horizontal: tablero y bandeja en la parte de abajo, la marca a la izquierda y el título arriba a la derecha (D-014). */
+const LAYOUTS = {
+  v: { W: 1080, H: 1920, mar: 880, arena: 1440,
+    juego: { tablero: { x: 400, y: 182, lado: LADO }, muestra: { x: 40, y: 190, lado: 326 },
+      ayuda: { x: 203, y: 612, lh: 46, fs: 34, lineas: ['Arrastra', 'cada pieza', 'a su lugar'] },
+      reloj: { x: 40, y: 36, w: 480, h: 116 }, vidas: { x: 540, y: 42, w: 280, h: 104 }, contador: { x: 840, y: 36, w: 200, h: 116 },
+      cuenta: { x: 40, y: 34, w: 1000, h: 120 },
+      // 16 piezas en 6 columnas y 3 filas (6, 6 y 4): lugares de 159 × 179; a escala 0,61 el cuerpo mide 98 y con
+      // pestañas no pasa de 154, así que ninguna tapa a otra
+      bandeja: { x: 40, y: 866, w: 1000, h: 584, cols: 6, esc: .61 },
+      titulo: { x: 540, y: 1512, fs: 84 }, sub: { y: 1580, fs: 42 },
+      bebe: { img: 'bebeSentado', x: 712, y: 1584, w: 336 }, logo: { x: 52, y: 1618, w: 246 }, producto: { x: 338, y: 1704, w: 166 },
+      sombrilla: { x: 1004, y: 1536, r: 86 } },
+    inicio: { titulo: { x: 540, y: 200, fs: 118 }, sub: { x: 540, y: 300, fs: 58 },
+      instr: { x: 540, y: 378, fs: 38, lh: 48, lineas: ['Arrastra cada pieza a su lugar.', 'Antes verás la imagen completa.', 'Tienes 1 minuto y 3 oportunidades.'] },
+      demo: { x: 300, y: 540, lado: LADO_DEMO, a: { x: 930, y: 640 }, b: { x: 150, y: 930 } }, boton: { x: 250, y: 1100, w: 580, h: 156 },
+      bebe: { img: 'bebeIngeniero', x: 716, y: 1276, h: 620 }, logo: { x: 56, y: 1490, w: 300 }, producto: { x: 392, y: 1620, w: 216 },
+      sombrilla: { x: 640, y: 1500, r: 80 } },
+    panel: { x: 60, y: 150, w: 960, h: 1180 } },
+  h: { W: 1920, H: 1080, mar: 470, arena: 830,
+    juego: { tablero: { x: 456, y: 404, lado: LADO }, muestra: { x: 456, y: 44, lado: 270 },
+      reloj: { x: 752, y: 40, w: 344, h: 110 }, vidas: { x: 752, y: 162, w: 344, h: 96 }, contador: { x: 752, y: 272, w: 344, h: 84 },
+      cuenta: { x: 752, y: 38, w: 344, h: 318 },
+      // 16 piezas en 4 columnas y 4 filas: lugares de 181 × 190; a escala 0,7 el cuerpo mide 112 y con pestañas 177
+      bandeja: { x: 1124, y: 236, w: 770, h: 808, cols: 4, esc: .7 },
+      titulo: { x: 1509, y: 98, fs: 80 }, sub: { x: 1509, y: 180, fs: 42 },
+      bebe: { img: 'bebeSentado', x: 34, y: 680, w: 380 }, logo: { x: 80, y: 40, w: 250 }, producto: { x: 146, y: 400, w: 166 } },
+    inicio: { titulo: { x: 1588, y: 196, fs: 118 }, sub: { x: 1588, y: 300, fs: 58 },
+      instr: { x: 1588, y: 384, fs: 38, lh: 50, lineas: ['Arrastra cada pieza', 'a su lugar.', 'Antes verás la imagen.', 'Tienes 1 minuto y', '3 oportunidades.'] },
+      demo: { x: 600, y: 270, lado: LADO_DEMO, a: { x: 1190, y: 380 }, b: { x: 520, y: 840 } }, boton: { x: 1338, y: 790, w: 500, h: 156 },
+      bebe: { img: 'bebeIngeniero', x: 96, y: 420, h: 640 }, logo: { x: 76, y: 36, w: 250 }, producto: { x: 880, y: 866, w: 150 },
+      sombrilla: { x: 1870, y: 1012, r: 64 } },
+    panel: { x: 420, y: 50, w: 1080, h: 980 } },
+};
+let LY = LAYOUTS.v;
+const centro = r => ({ x: r.x + r.w / 2, y: r.y + r.h / 2 });
+
+/* ======================= Recursos ======================= */
+const IMGS = { logo: 'img/logo.png', bebeSentado: 'img/bebe-sentado.png', bebeIngeniero: 'img/bebe-ingeniero.png',
+  panalPants: 'img/panal-pants.png', panalG: 'img/panal-g.png', panalAcuatico: 'img/panal-acuatico.png',
+  toallitaAzul: 'img/toallita-azul.png', toallitaBlanca: 'img/toallita-blanca.png', toallitaRosa: 'img/toallita-rosa.png' };
+/* En la lámina los bebés van recortados a lo que se ve (en nativo, un TextureRegion); los productos van completos.
+   Medidas en píxeles de cada PNG (las mismas de la memoria). */
+const REGION = { bebeSentado: [135, 34, 799, 881], bebeIngeniero: [71, 86, 582, 1245] };
+const IM = {};
+function cargarImagen(k) { return new Promise(ok => { const im = new Image(); im.onload = () => { IM[k] = im; ok(); }; im.onerror = () => ok(); im.src = recurso(IMGS[k]); }); }
+// dibuja una imagen con su proporción original: se da el ancho o el alto, nunca los dos
+function imagen(k, x, y, w, h) { const im = IM[k]; if (!im) return; const a = im.naturalWidth / im.naturalHeight;
+  if (w == null) w = h * a; else h = w / a; ctx.drawImage(im, x, y, w, h); return { w, h }; }
+
+/* ======================= Utilidades de dibujo ======================= */
+const lerp = (a, b, k) => a + (b - a) * k, clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+const easeOut = k => 1 - Math.pow(1 - clamp(k, 0, 1), 3);
+const easeIn = k => Math.pow(clamp(k, 0, 1), 3);
+const easeInOut = k => { k = clamp(k, 0, 1); return k < .5 ? 4 * k * k * k : 1 - Math.pow(-2 * k + 2, 3) / 2; };
+const easeBack = k => { k = clamp(k, 0, 1); const s = 1.70158; return 1 + (s + 1) * Math.pow(k - 1, 3) + s * Math.pow(k - 1, 2); };
+const FUENTE = (peso, tam) => `${peso} ${tam}px Fredoka, "Arial Rounded MT Bold", "Trebuchet MS", sans-serif`;
+function rr(c, x, y, w, h, r) { r = Math.min(r, w / 2, h / 2); c.beginPath(); c.moveTo(x + r, y); c.arcTo(x + w, y, x + w, y + h, r);
+  c.arcTo(x + w, y + h, x, y + h, r); c.arcTo(x, y + h, x, y, r); c.arcTo(x, y, x + w, y, r); c.closePath(); }
+function texto(s, x, y, o) {
+  ctx.save(); ctx.font = FUENTE(o.peso || 700, o.fs);
+  let k = o.k || 1; if (o.max) { const w = ctx.measureText(s).width; if (w * k > o.max) k = o.max / w; }
+  ctx.translate(x, y); if (k !== 1) ctx.scale(k, k);
+  ctx.textAlign = o.al || 'center'; ctx.textBaseline = 'middle'; ctx.lineJoin = 'round';
+  if (o.sombra) { ctx.fillStyle = o.sombra; if (o.borde) { ctx.lineWidth = o.borde; ctx.strokeStyle = o.sombra; ctx.strokeText(s, 0, o.fs * .08); } ctx.fillText(s, 0, o.fs * .08); }
+  if (o.borde) { ctx.lineWidth = o.borde; ctx.strokeStyle = o.colorBorde || C.blanco; ctx.strokeText(s, 0, 0); }
+  ctx.fillStyle = o.color || C.tinta; ctx.fillText(s, 0, 0); ctx.restore();
+}
+function lienzoAparte(w, h) { const c = document.createElement('canvas'); c.width = Math.max(1, Math.ceil(w)); c.height = Math.max(1, Math.ceil(h)); return c; }
+function corazon(c, cx, cy, s) { // corazón de lado s, centrado
+  c.beginPath(); c.moveTo(cx, cy + s * .38);
+  c.bezierCurveTo(cx - s * .62, cy - s * .02, cx - s * .42, cy - s * .52, cx, cy - s * .22);
+  c.bezierCurveTo(cx + s * .42, cy - s * .52, cx + s * .62, cy - s * .02, cx, cy + s * .38); c.closePath(); }
+function estrella4(c, x, y, r) { c.beginPath(); for (let i = 0; i < 8; i++) { const a = i * Math.PI / 4, q = i % 2 ? r * .28 : r; c.lineTo(x + Math.cos(a) * q, y + Math.sin(a) * q); } c.closePath(); }
+function estrella5(c, x, y, r, rot = 0) { c.beginPath(); for (let i = 0; i < 10; i++) { const a = rot - Math.PI / 2 + i * Math.PI / 5, q = i % 2 ? r * .48 : r; c.lineTo(x + Math.cos(a) * q, y + Math.sin(a) * q); } c.closePath(); }
+function concha(c, x, y, s) { c.fillStyle = '#FFE3EE'; c.beginPath(); c.moveTo(x, y + s * .5); for (let k = 0; k <= 8; k++) { const a = Math.PI + k * Math.PI / 8; c.lineTo(x + Math.cos(a) * s, y + Math.sin(a) * s * .9); } c.closePath(); c.fill();
+  c.strokeStyle = 'rgba(200,120,150,.6)'; c.lineWidth = Math.max(1.5, s * .1); for (let k = 1; k < 8; k++) { const a = Math.PI + k * Math.PI / 8; c.beginPath(); c.moveTo(x, y + s * .5); c.lineTo(x + Math.cos(a) * s * .9, y + Math.sin(a) * s * .8); c.stroke(); } }
+function nubecita(c, x, y, k) { [[0, 0, 26], [28, -14, 32], [58, 0, 24], [30, 8, 26]].forEach(([dx, dy, r]) => { c.beginPath(); c.arc(x + dx * k, y + dy * k, r * k, 0, 6.29); c.fill(); }); }
+function visto(c, x, y, s, color) { // círculo con el visto de pieza o imagen completa
+  c.fillStyle = 'rgba(0,40,20,.25)'; c.beginPath(); c.arc(x, y + s * .08, s, 0, 6.29); c.fill();
+  c.fillStyle = color || C.verde; c.beginPath(); c.arc(x, y, s, 0, 6.29); c.fill(); c.lineWidth = s * .16; c.strokeStyle = '#FFFFFF'; c.stroke();
+  c.lineCap = 'round'; c.lineJoin = 'round'; c.lineWidth = s * .24; c.beginPath(); c.moveTo(x - s * .42, y + s * .02); c.lineTo(x - s * .1, y + s * .34); c.lineTo(x + s * .46, y - s * .3); c.stroke(); }
+
+/* ======================= Forma de las piezas =======================
+   Cada borde interior es la curva del generador de Draradech (CC0): tres curvas de Bézier cúbicas por lado, con la
+   pestaña del 20 % y una pequeña variación por borde (sale de logica.js). Los bordes del contorno son rectos.
+   Se trazan en coordenadas del tablero; una misma curva sirve a las dos piezas que la comparten (una la recorre al
+   revés), así encajan exacto. */
+function puntosBorde(e, x0, y0, cel, horizontal) {
+  const t = LG.PESTANA, b = e.b, cc = e.c, d = e.d, s = e.signo;
+  const ls = [0, .2, .5 + b + d, .5 - t + b, .5 - 2 * t + b - d, .5 + 2 * t + b - d, .5 + t + b, .5 + b + d, .8, 1];
+  const ws = [0, 0, -t + cc, t + cc, 3 * t + cc, 3 * t + cc, t + cc, -t + cc, 0, 0];
+  return ls.map((l, k) => horizontal ? [x0 + l * cel, y0 + ws[k] * cel * s] : [x0 + ws[k] * cel * s, y0 + l * cel]);
+}
+function curvas(c, P, reves) { const Q = reves ? P.slice().reverse() : P;
+  for (let k = 1; k < 10; k += 3) c.bezierCurveTo(Q[k][0], Q[k][1], Q[k + 1][0], Q[k + 1][1], Q[k + 2][0], Q[k + 2][1]); }
+function trazarPieza(c, cortes, i, cel) {
+  const f = Math.floor(i / N), k = i % N, x0 = k * cel, y0 = f * cel, x1 = x0 + cel, y1 = y0 + cel;
+  c.beginPath(); c.moveTo(x0, y0);
+  if (f === 0) c.lineTo(x1, y0); else curvas(c, puntosBorde(cortes.h[f - 1][k], x0, y0, cel, true), false);
+  if (k === N - 1) c.lineTo(x1, y1); else curvas(c, puntosBorde(cortes.v[f][k], x1, y0, cel, false), false);
+  if (f === N - 1) c.lineTo(x0, y1); else curvas(c, puntosBorde(cortes.h[f][k], x0, y1, cel, true), true);
+  if (k === 0) c.lineTo(x0, y0); else curvas(c, puntosBorde(cortes.v[f][k - 1], x0, y0, cel, false), true);
+  c.closePath();
+}
+
+/* ======================= Imágenes horneadas (en nativo: texturas) ======================= */
+const H_ = {};
+let pxP = 1;                              // resolución de la lámina y las piezas horneadas
+function hornearTodo() {
+  pxP = Math.min(px, 1.6);
+  hornearFondo(); hornearNube(); hornearBrillo(); hornearHalo(); hornearFranja(); hornearToalla();
+  if (demo) demo.set = hornearSet(demo.imagen, demo.cortes, LADO_DEMO, false);
+  if (partida) J = hornearSet(partida.imagen, partida.cortes, LADO, true);
+}
+function hornearFondo() {     // la playa: el cielo del parque y el agua del mar, con arena
+  const cv = lienzoAparte(W * px, H * px), c = cv.getContext('2d'); c.scale(px, px);
+  const mar = LY.mar, arena = LY.arena, rnd = mulberry32(51);
+  const cielo = c.createLinearGradient(0, 0, 0, mar);
+  cielo.addColorStop(0, '#3AA6EA'); cielo.addColorStop(.6, '#7FCBF4'); cielo.addColorStop(1, '#D4F0FC');
+  c.fillStyle = cielo; c.fillRect(0, 0, W, H);
+  const sol = c.createRadialGradient(W * .86, H * .05, 0, W * .86, H * .05, W * .5);
+  sol.addColorStop(0, 'rgba(255,255,235,.6)'); sol.addColorStop(1, 'rgba(255,255,235,0)'); c.fillStyle = sol; c.fillRect(0, 0, W, mar);
+  // mar con su luz
+  const agua = c.createLinearGradient(0, mar, 0, arena);
+  agua.addColorStop(0, '#5FD0F2'); agua.addColorStop(.45, '#2FA8E0'); agua.addColorStop(1, '#1987CC');
+  c.fillStyle = agua; c.fillRect(0, mar, W, arena - mar + 40);
+  c.fillStyle = 'rgba(255,255,255,.55)'; c.fillRect(0, mar - 2, W, 4);
+  // isla lejana con dos palmeras pequeñas
+  const ix = O === 'v' ? W * .2 : W * .1, iy = mar;
+  c.fillStyle = '#7CC456'; c.beginPath(); c.ellipse(ix, iy, 110, 26, 0, Math.PI, 0); c.fill();
+  c.strokeStyle = '#8A5A2B'; c.lineWidth = 6; c.lineCap = 'round';
+  [[ix - 20, 1], [ix + 26, -1]].forEach(([x, d]) => { c.beginPath(); c.moveTo(x, iy - 18); c.quadraticCurveTo(x + d * 6, iy - 50, x + d * 12, iy - 76); c.stroke();
+    c.fillStyle = '#3E9630'; for (let k = 0; k < 5; k++) { const a = -Math.PI / 2 + (k - 2) * .62; c.beginPath(); c.ellipse(x + d * 12 + Math.cos(a) * 20, iy - 76 + Math.sin(a) * 12 + 6, 24, 7, a, 0, 6.29); c.fill(); } });
+  // reflejos fijos sobre el agua
+  c.strokeStyle = 'rgba(255,255,255,.25)'; c.lineWidth = 3;
+  for (let i = 0; i < 40; i++) { const x = rnd() * W, y = mar + 20 + rnd() * (arena - mar - 20), w = 20 + rnd() * 40; c.beginPath(); c.moveTo(x, y); c.lineTo(x + w, y); c.stroke(); }
+  // arena con la orilla
+  c.beginPath(); c.moveTo(0, H); c.lineTo(0, arena + 16);
+  for (let i = 0; i < 4; i++) { const x0 = W * i / 4, x1 = W * (i + 1) / 4; c.quadraticCurveTo((x0 + x1) / 2, arena - 22 + (i % 2) * 34, x1, arena + 10); }
+  c.lineTo(W, H); c.closePath();
+  const ar = c.createLinearGradient(0, arena - 30, 0, H); ar.addColorStop(0, '#F8E3AE'); ar.addColorStop(1, '#E2BC74'); c.fillStyle = ar; c.fill();
+  c.strokeStyle = 'rgba(255,255,255,.9)'; c.lineWidth = 8; c.beginPath(); c.moveTo(0, arena + 16);
+  for (let i = 0; i < 4; i++) { const x0 = W * i / 4, x1 = W * (i + 1) / 4; c.quadraticCurveTo((x0 + x1) / 2, arena - 22 + (i % 2) * 34, x1, arena + 10); } c.stroke();
+  for (let i = 0; i < 80; i++) { const x = rnd() * W, y = arena + 40 + rnd() * (H - arena - 50); c.fillStyle = rnd() < .5 ? 'rgba(160,120,60,.3)' : 'rgba(255,255,255,.55)';
+    c.beginPath(); c.ellipse(x, y, 3 + rnd() * 5, 2 + rnd() * 3, 0, 0, 6.29); c.fill(); }
+  for (let i = 0; i < (O === 'v' ? 6 : 7); i++) { const x = 40 + rnd() * (W - 80), y = arena + 60 + rnd() * (H - arena - 100), s = 16 + rnd() * 12;
+    if (i % 2) { c.fillStyle = '#FF8A5B'; estrella5(c, x, y, s, rnd()); c.fill(); c.fillStyle = 'rgba(255,255,255,.6)'; c.beginPath(); c.arc(x, y, s * .15, 0, 6.29); c.fill(); }
+    else concha(c, x, y, s); }
+  H_.fondo = cv;
+}
+function hornearNube() {
+  const w = 420, h = 200, cv = lienzoAparte(w * px, h * px), c = cv.getContext('2d'); c.scale(px, px);
+  const bolas = [[110, 130, 70], [190, 95, 88], [285, 120, 72], [345, 145, 50], [70, 150, 45], [230, 150, 70]];
+  c.fillStyle = 'rgba(160,200,235,.55)'; bolas.forEach(([x, y, r]) => { c.beginPath(); c.arc(x, y + 10, r, 0, Math.PI * 2); c.fill(); });
+  c.fillStyle = '#FFFFFF'; bolas.forEach(([x, y, r]) => { c.beginPath(); c.arc(x, y, r, 0, Math.PI * 2); c.fill(); });
+  H_.nube = cv; H_.nubeW = w; H_.nubeH = h;
+}
+function hornearBrillo() { // mancha de luz suave
+  const s = 128, cv = lienzoAparte(s, s), c = cv.getContext('2d'), g = c.createRadialGradient(s / 2, s / 2, 0, s / 2, s / 2, s / 2);
+  g.addColorStop(0, 'rgba(255,255,255,1)'); g.addColorStop(.45, 'rgba(255,255,255,.45)'); g.addColorStop(1, 'rgba(255,255,255,0)');
+  c.fillStyle = g; c.fillRect(0, 0, s, s); H_.brillo = cv;
+}
+function hornearHalo() {   // resplandor dorado detrás de la pieza que encaja
+  const s = 256, cv = lienzoAparte(s, s), c = cv.getContext('2d'), g = c.createRadialGradient(s / 2, s / 2, 0, s / 2, s / 2, s / 2);
+  g.addColorStop(0, 'rgba(255,236,150,1)'); g.addColorStop(.4, 'rgba(255,201,60,.6)'); g.addColorStop(1, 'rgba(255,201,60,0)');
+  c.fillStyle = g; c.fillRect(0, 0, s, s); H_.halo = cv;
+}
+function hornearFranja() { // franja de luz que cruza la imagen al completarla
+  const w = 200, h = 64, cv = lienzoAparte(w, h), c = cv.getContext('2d'), g = c.createLinearGradient(0, 0, w, 0);
+  g.addColorStop(0, 'rgba(255,255,255,0)'); g.addColorStop(.5, 'rgba(255,255,255,.75)'); g.addColorStop(1, 'rgba(255,255,255,0)');
+  c.fillStyle = g; c.fillRect(0, 0, w, h); H_.franja = cv;
+}
+function hornearToalla() {  // la bandeja es una toalla de playa a rayas, donde esperan las piezas
+  const b = LY.juego.bandeja, cv = lienzoAparte((b.w + 40) * px, (b.h + 40) * px), c = cv.getContext('2d'); c.scale(px, px); c.translate(20, 20);
+  rr(c, 0, 12, b.w, b.h, 40); c.fillStyle = 'rgba(0,40,100,.22)'; c.fill();
+  c.save(); rr(c, 0, 0, b.w, b.h, 40); c.clip();
+  c.fillStyle = '#FFFFFF'; c.fillRect(0, 0, b.w, b.h);
+  const largo = Math.max(b.w, b.h), vertical = b.w >= b.h;   // rayas a lo ancho de la toalla
+  for (let k = 0; k * 90 < largo + 90; k++) { c.fillStyle = k % 2 ? '#D3EEFC' : '#FFFFFF'; if (vertical) c.fillRect(k * 90, 0, 90, b.h); else c.fillRect(0, k * 90, b.w, 90); }
+  c.fillStyle = 'rgba(220,28,38,.75)'; if (vertical) { c.fillRect(34, 0, 12, b.h); c.fillRect(b.w - 46, 0, 12, b.h); } else { c.fillRect(0, 34, b.w, 12); c.fillRect(0, b.h - 46, b.w, 12); }
+  c.restore();
+  rr(c, 0, 0, b.w, b.h, 40); c.lineWidth = 6; c.strokeStyle = C.azul; c.stroke();
+  c.setLineDash([14, 10]); rr(c, 14, 14, b.w - 28, b.h - 28, 30); c.lineWidth = 3; c.strokeStyle = 'rgba(0,52,138,.35)'; c.stroke(); c.setLineDash([]);
+  H_.toalla = cv;
+}
+/* La lámina: la imagen entera, con su proporción, sobre una playa en miniatura. El fondo da algo que mirar a cada
+   pieza (cielo, sol, mar, arena), para que también las esquinas se puedan ubicar. */
+function hornearLamina(id, L) {
+  const cv = lienzoAparte(L * pxP, L * pxP), c = cv.getContext('2d'); c.scale(pxP, pxP); const k = L / 720;
+  const cielo = c.createLinearGradient(0, 0, 0, L * .6); cielo.addColorStop(0, '#3FA9EA'); cielo.addColorStop(1, '#C6ECFB');
+  c.fillStyle = cielo; c.fillRect(0, 0, L, L);
+  const sg = c.createRadialGradient(L * .86, L * .12, 0, L * .86, L * .12, L * .24); sg.addColorStop(0, 'rgba(255,250,210,.95)'); sg.addColorStop(1, 'rgba(255,250,210,0)');
+  c.fillStyle = sg; c.fillRect(0, 0, L, L * .5);
+  c.fillStyle = '#FFE27A'; c.beginPath(); c.arc(L * .86, L * .12, L * .07, 0, 6.29); c.fill(); c.lineWidth = 5 * k; c.strokeStyle = '#FFC93C'; c.stroke();
+  c.fillStyle = '#FFFFFF'; nubecita(c, L * .08, L * .13, 1.5 * k); nubecita(c, L * .5, L * .07, 1.1 * k);
+  const ag = c.createLinearGradient(0, L * .56, 0, L * .82); ag.addColorStop(0, '#6FD8F4'); ag.addColorStop(1, '#1E95D6');
+  c.fillStyle = ag; c.fillRect(0, L * .56, L, L * .28);
+  c.strokeStyle = 'rgba(255,255,255,.6)'; c.lineWidth = 4 * k; c.lineCap = 'round';
+  for (let f = 0; f < 3; f++) { c.beginPath(); for (let x = 0; x <= L; x += 8) c.lineTo(x, L * (.61 + f * .065) + Math.sin(x / (22 * k) + f * 2) * 4 * k); c.stroke(); }
+  c.beginPath(); c.moveTo(0, L); c.lineTo(0, L * .8); c.quadraticCurveTo(L * .3, L * .76, L * .55, L * .8); c.quadraticCurveTo(L * .8, L * .84, L, L * .79); c.lineTo(L, L); c.closePath();
+  const ar = c.createLinearGradient(0, L * .78, 0, L); ar.addColorStop(0, '#F8E3AE'); ar.addColorStop(1, '#E6C27C'); c.fillStyle = ar; c.fill();
+  c.strokeStyle = 'rgba(255,255,255,.95)'; c.lineWidth = 6 * k; c.beginPath(); c.moveTo(0, L * .8); c.quadraticCurveTo(L * .3, L * .76, L * .55, L * .8); c.quadraticCurveTo(L * .8, L * .84, L, L * .79); c.stroke();
+  c.fillStyle = '#FF8A5B'; estrella5(c, L * .1, L * .91, L * .045, .3); c.fill(); concha(c, L * .9, L * .91, L * .04);
+  const im = IM[id];
+  if (im) {
+    const [sx, sy, sw, sh] = REGION[id] || [0, 0, im.naturalWidth, im.naturalHeight];
+    const bw = L * .8, bh = L * .82, s = Math.min(bw / sw, bh / sh), dw = sw * s, dh = sh * s, cy = L * .5;
+    const gl = c.createRadialGradient(L / 2, cy, 0, L / 2, cy, Math.max(dw, dh) * .62); gl.addColorStop(0, 'rgba(255,255,255,.85)'); gl.addColorStop(.7, 'rgba(255,255,255,.35)'); gl.addColorStop(1, 'rgba(255,255,255,0)');
+    c.fillStyle = gl; c.fillRect(0, 0, L, L);
+    c.fillStyle = 'rgba(120,90,40,.3)'; c.beginPath(); c.ellipse(L / 2, cy + dh / 2 - 4 * k, dw * .42, L * .025, 0, 0, 6.29); c.fill();
+    c.drawImage(im, sx, sy, sw, sh, (L - dw) / 2, cy - dh / 2, dw, dh);
+  }
+  return cv;
+}
+// todo lo de una partida: lámina, y por pieza su recorte plano, su relieve de cartón y su sombra
+function hornearSet(id, cortes, lado, conTablero) {
+  const cel = lado / N, m = Math.ceil(cel * .34), ms = 18, tam = cel + 2 * m, lamina = hornearLamina(id, lado);
+  const piezas = [];
+  for (let i = 0; i < PIEZAS; i++) {
+    const ox = (i % N) * cel - m, oy = Math.floor(i / N) * cel - m;
+    const plana = lienzoAparte(tam * pxP, tam * pxP), a = plana.getContext('2d'); a.scale(pxP, pxP); a.translate(-ox, -oy);
+    trazarPieza(a, cortes, i, cel); a.clip(); a.drawImage(lamina, 0, 0, lado, lado);
+    const relieve = lienzoAparte(tam * pxP, tam * pxP), b = relieve.getContext('2d'); b.scale(pxP, pxP); b.translate(-ox, -oy);
+    trazarPieza(b, cortes, i, cel); b.clip(); b.lineJoin = 'round';
+    const g = Math.max(2.5, cel * .014);
+    b.save(); b.translate(g, g); trazarPieza(b, cortes, i, cel); b.lineWidth = g * 2.4; b.strokeStyle = 'rgba(255,255,255,.8)'; b.stroke(); b.restore();
+    b.save(); b.translate(-g, -g); trazarPieza(b, cortes, i, cel); b.lineWidth = g * 2.4; b.strokeStyle = 'rgba(0,25,70,.42)'; b.stroke(); b.restore();
+    trazarPieza(b, cortes, i, cel); b.lineWidth = g * 1.3; b.strokeStyle = 'rgba(0,30,80,.55)'; b.stroke();
+    const sombra = lienzoAparte((tam + 2 * ms) * pxP, (tam + 2 * ms) * pxP), s = sombra.getContext('2d'); s.scale(pxP, pxP); s.translate(ms - ox, ms - oy);
+    s.shadowColor = 'rgba(0,25,70,.75)'; s.shadowBlur = 12 * pxP; trazarPieza(s, cortes, i, cel); s.fillStyle = 'rgba(0,25,70,.55)'; s.fill();
+    piezas.push({ plana, relieve, sombra });
+  }
+  const set = { id, cortes, lado, cel, m, ms, tam, lamina, piezas };
+  if (conTablero) set.tablero = hornearTablero(set);
+  return set;
+}
+// el tablero: marco blanco con filete azul y línea roja (como el plato de la sopa) y las siluetas punteadas de las
+// piezas; sin la imagen debajo (Alexander, D-039): la única guía es el cuadrito «ASÍ QUEDA»
+function hornearTablero(set) {
+  const L = set.lado, mg = 24, cv = lienzoAparte((L + 2 * mg + 20) * pxP, (L + 2 * mg + 20) * pxP), c = cv.getContext('2d'); c.scale(pxP, pxP); c.translate(10, 4);
+  rr(c, 0, 12, L + 2 * mg, L + 2 * mg, 34); c.fillStyle = 'rgba(0,40,100,.25)'; c.fill();
+  rr(c, 0, 0, L + 2 * mg, L + 2 * mg, 34); c.fillStyle = '#FFFFFF'; c.fill(); c.lineWidth = 7; c.strokeStyle = C.azul; c.stroke();
+  rr(c, 10, 10, L + 2 * mg - 20, L + 2 * mg - 20, 26); c.lineWidth = 3; c.strokeStyle = 'rgba(220,28,38,.7)'; c.stroke();
+  c.save(); c.translate(mg, mg);
+  c.fillStyle = '#EAF5FB'; c.fillRect(0, 0, L, L);
+  c.setLineDash([12, 9]); c.lineWidth = 3; c.strokeStyle = 'rgba(0,52,138,.35)'; c.lineJoin = 'round';
+  for (let i = 0; i < PIEZAS; i++) { trazarPieza(c, set.cortes, i, set.cel); c.stroke(); }
+  c.setLineDash([]); c.lineWidth = 4; c.strokeStyle = 'rgba(0,52,138,.4)'; c.strokeRect(0, 0, L, L);
+  c.restore();
+  return { cv, mg, dx: 10, dy: 4 };
+}
+
+/* ======================= Sonido =======================
+   Web Audio. Muestras CC0: música (OpenGameArt, OwlishMedia), victoria (Kenney) y cartón sobre la mesa (Kenney,
+   Casino Audio: las piezas suenan como cartas porque son cartón). Lo demás es síntesis y es el respaldo. */
+const MUSICA = PARAMS.get('musica') || 'archivo';
+let AC = null, master = null, sfx = null, musBus = null, ruido = null;
+const MUESTRAS = {};
+const VOL = { master: .8, musica: .2 };
+function iniciarAudio() {
+  if (!AC) { try {
+    AC = new (window.AudioContext || window.webkitAudioContext)();
+    const comp = AC.createDynamicsCompressor(); master = AC.createGain(); master.gain.value = VOL.master; master.connect(comp); comp.connect(AC.destination);
+    sfx = AC.createGain(); sfx.connect(master); musBus = AC.createGain(); musBus.gain.value = .0001; musBus.connect(master);
+    ruido = AC.createBuffer(1, AC.sampleRate, AC.sampleRate); const d = ruido.getChannelData(0); for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+    cargarMuestras().then(() => { if (MUSICA !== '0') musicaArrancar(); });
+  } catch (e) { AC = null; } }
+  if (AC && AC.state === 'suspended') AC.resume();
+}
+function base64aBuffer(b64) { const s = atob(b64.split(',')[1]), a = new Uint8Array(s.length); for (let i = 0; i < s.length; i++) a[i] = s.charCodeAt(i); return a.buffer; }
+async function cargarUna(k, ruta) {
+  try { const r = recurso(ruta); const buf = r.startsWith('data:') ? base64aBuffer(r) : await (await fetch(r)).arrayBuffer();
+    MUESTRAS[k] = await new Promise((ok, mal) => AC.decodeAudioData(buf, ok, mal)); } catch (e) { /* queda la síntesis */ }
+}
+function cargarMuestras() {
+  const lista = [['victoria', 'sonidos/victoria.mp3'], ['voltear', 'sonidos/voltear.mp3'], ['colocar', 'sonidos/colocar.mp3'],
+    ['barajar', 'sonidos/barajar.mp3'], ['abanico', 'sonidos/abanico.mp3']];
+  if (MUSICA === 'archivo') lista.push(['musica', 'sonidos/musica-fondo.mp3']);
+  return Promise.all(lista.map(([k, r]) => cargarUna(k, r)));
+}
+const ahora = () => AC ? AC.currentTime : 0;
+function env(g, t0, v, a, d) { g.gain.setValueAtTime(0, t0); g.gain.linearRampToValueAtTime(v, t0 + a); g.gain.exponentialRampToValueAtTime(.0001, t0 + d); }
+function tono(f, t, d, o = {}) { if (!AC) return; const t0 = ahora() + t, os = AC.createOscillator(), g = AC.createGain();
+  os.type = o.tipo || 'sine'; os.frequency.setValueAtTime(f, t0); if (o.a2) os.frequency.exponentialRampToValueAtTime(o.a2, t0 + (o.glide || d));
+  env(g, t0, o.vol ?? .2, o.ataque ?? .005, d); let n = os;
+  if (o.lp) { const fl = AC.createBiquadFilter(); fl.type = 'lowpass'; fl.frequency.value = o.lp; os.connect(fl); n = fl; }
+  n.connect(g); g.connect(o.bus || sfx); os.start(t0); os.stop(t0 + d + .05); }
+function soplo(t, d, o = {}) { if (!AC) return; const t0 = ahora() + t, s = AC.createBufferSource(); s.buffer = ruido; s.loop = d > .9;
+  const f = AC.createBiquadFilter(); f.type = o.tipo || 'bandpass'; f.Q.value = o.q ?? 1; f.frequency.setValueAtTime(o.f0 || 1500, t0);
+  if (o.f1) f.frequency.exponentialRampToValueAtTime(o.f1, t0 + d);
+  const g = AC.createGain(); env(g, t0, o.vol ?? .15, o.ataque ?? .004, d); s.connect(f); f.connect(g); g.connect(o.bus || sfx); s.start(t0, Math.random() * .5); s.stop(t0 + d + .05); }
+function muestra(k, t = 0, vol = 1, vel = 1) { if (!AC || !MUESTRAS[k]) return false; const s = AC.createBufferSource(), g = AC.createGain();
+  s.buffer = MUESTRAS[k]; s.playbackRate.value = vel; g.gain.value = vol; s.connect(g); g.connect(sfx); s.start(ahora() + t); return true; }
+function agachar(seg, factor) { if (!AC) return; const g = musBus.gain, t = ahora(), nivel = musicaNivel();
+  g.cancelScheduledValues(t); g.setValueAtTime(g.value, t); g.setTargetAtTime(nivel * factor, t, .03); g.setTargetAtTime(nivel, t + seg, .3); }
+const SFX = {
+  boton() { tono(520, 0, .09, { a2: 980, vol: .22, tipo: 'triangle' }); soplo(0, .05, { f0: 3000, vol: .06 }); },
+  // tomar una pieza: un "pop" suave hacia arriba y el roce del cartón
+  tomar() { tono(420, 0, .08, { a2: 700, vol: .12, tipo: 'triangle' }); muestra('voltear', 0, .18, 1.35); },
+  // dejarla en la toalla
+  dejar() { if (!muestra('colocar', 0, .22, 1.2)) tono(260, 0, .05, { vol: .07, tipo: 'triangle' }); },
+  // vuelve a la bandeja
+  volver(t = 0) { if (!muestra('voltear', t, .4, .9)) soplo(t, .14, { f0: 2400, f1: 800, vol: .1, q: .8 }); },
+  // encaje: el golpe del cartón, un clic y un arpegio que sube un poco con cada pieza
+  encaje(k) { agachar(.8, .5); if (!muestra('colocar', 0, .6, 1.05)) tono(240, 0, .05, { vol: .12, tipo: 'triangle' });
+    tono(2600, 0, .03, { vol: .06, tipo: 'square', lp: 5000 });
+    const b = 523.25 * Math.pow(2, (k / (PIEZAS - 1)) * 12 / 12);   // sube una octava de la primera a la última
+    [0, 4, 7, 12].forEach((s, i) => tono(b * Math.pow(2, s / 12), .05 + i * .06, .3, { vol: .12, tipo: 'triangle' }));
+    for (let i = 0; i < 3; i++) tono(2093 + i * 392, .3 + i * .05, .2, { vol: .03, tipo: 'triangle' }); },
+  repartir() { if (!muestra('barajar', 0, .45)) soplo(0, .9, { f0: 1800, vol: .1 }); },
+  caer(t) { if (!muestra('colocar', t, .22, .9 + Math.random() * .25)) tono(240, t, .05, { vol: .06, tipo: 'triangle' }); },
+  abanico() { if (!muestra('abanico', 0, .5)) soplo(0, .5, { f0: 900, f1: 3000, vol: .1 }); },
+  cuenta(n) { const f = n === 1 ? 1567.98 : 1174.66; tono(f, 0, .1, { vol: .13, tipo: 'triangle' }); tono(f * 2, 0, .05, { vol: .03 }); },
+  ya() { tono(1046.5, 0, .25, { vol: .12, tipo: 'triangle' }); tono(1567.98, .08, .35, { vol: .1, tipo: 'triangle' }); },
+  tic(fuerte) { tono(fuerte ? 1760 : 1320, 0, .05, { vol: fuerte ? .16 : .11, tipo: 'triangle' }); soplo(0, .03, { tipo: 'highpass', f0: 4000, vol: .05 }); },
+  error() { agachar(.6, .5); tono(330, 0, .26, { a2: 150, vol: .2, tipo: 'triangle', lp: 1400 }); tono(250, .1, .3, { a2: 110, vol: .14, tipo: 'sine' }); },
+  vida() { tono(180, .08, .22, { a2: 70, vol: .22 }); soplo(.08, .14, { tipo: 'lowpass', f0: 500, f1: 150, vol: .1 }); },
+  burbuja() { const f = 700 + Math.random() * 600; tono(f, 0, .05, { a2: f * 1.8, vol: .03 }); },
+  // ola que llega a la orilla: ruido filtrado que crece y se va
+  ola() { soplo(0, 2.6, { tipo: 'lowpass', f0: 380, f1: 1600, vol: .05, ataque: 1.0, q: .5 }); soplo(.9, 1.6, { tipo: 'highpass', f0: 3500, vol: .012, ataque: .5 }); },
+  gaviota() { const b = 1500 + Math.random() * 300; for (let i = 0; i < 2; i++) tono(b, i * .22, .16, { a2: b * .7, vol: .025, tipo: 'triangle', glide: .14 }); },
+  victoria() { agachar(3.2, .3); muestra('victoria', 0, .9);
+    const n = [523.25, 659.25, 783.99, 1046.5]; n.forEach((f, i) => tono(f, .55 + i * .11, .3, { tipo: 'square', vol: .06, lp: 3200 }));
+    [523.25, 659.25, 783.99, 1046.5, 1318.5].forEach(f => tono(f, 1.0, 1.6, { tipo: 'triangle', vol: .08, ataque: .03 }));
+    for (let i = 0; i < 14; i++) tono(1800 + Math.random() * 2400, 1.05 + i * .07, .12, { vol: .025 }); },
+  derrota() { agachar(2.6, .35); [[784, 0], [659.25, .22], [523.25, .44]].forEach(([f, t]) => tono(f, t, .35, { tipo: 'triangle', vol: .12, ataque: .02 }));
+    [392, 493.88, 587.33].forEach(f => tono(f, .8, 1.3, { tipo: 'sine', vol: .07, ataque: .12 })); },
+};
+/* Música de fondo: Happy Clappy Loop en bucle (la misma de la sopa y las memorias) o una base suave hecha por código */
+const mus = { on: false, src: null, timer: null, paso: 0, prox: 0 };
+function musicaNivel() { return estado === 'resultado' || estado === 'inicio' ? VOL.musica * .85 : VOL.musica; }
+function musicaArrancar() { if (mus.on || !AC) return; mus.on = true; const t = ahora();
+  musBus.gain.setValueAtTime(.0001, t); musBus.gain.setTargetAtTime(musicaNivel(), t, .8);
+  const m = MUESTRAS.musica;
+  if (m) { const s = AC.createBufferSource(); s.buffer = m; s.loop = true; s.loopStart = 0; s.loopEnd = Math.min(m.duration, 17.44); s.connect(musBus); s.start(t + .1); mus.src = s; return; }
+  mus.prox = t + .1; mus.timer = setInterval(musicaTic, 40); }
+const ACORDES = [[261.63, 329.63, 392], [220, 261.63, 329.63], [174.61, 220, 261.63], [196, 246.94, 293.66]];
+function musicaTic() { const PASO = .3;
+  while (mus.prox < ahora() + .15) { const t = mus.prox - ahora(), ac = ACORDES[Math.floor(mus.paso / 8) % 4], k = mus.paso % 8;
+    const nota = ac[[0, 2, 1, 2, 0, 2, 1, 2][k]] * 2; tono(nota, t, .45, { tipo: 'triangle', vol: .09, bus: musBus, lp: 2500 });
+    if (k === 0) { ac.forEach(f => tono(f, t, 2.3, { tipo: 'sine', vol: .05, ataque: .3, bus: musBus })); tono(ac[0] / 2, t, .8, { vol: .12, bus: musBus }); }
+    if (k === 4) tono(ac[0] / 2, t, .6, { vol: .08, bus: musBus });
+    mus.paso++; mus.prox += PASO; } }
+
+/* ======================= Estado ======================= */
+let estado = 'carga';           // carga, inicio, entrada, vista, mezcla, juego, fin, resultado
+let tEstado = 0, tAhora = 0, ultimaActividad = 0;
+let partida = null, J = null, vis = [], zorden = [], imagenAnterior = null, demo = null, arrastre = null;
+let motivoFin = '', festejo = false, saltoBebe = -9, tVida = -9, tCuenta = Infinity, tMezcla = -9, tVictoria = -9, salidaEn = -1, ultimoTic = -1;
+const particulas = [], textos = [];
+let cartel = null, botones = [], botonApretado = null;
+
+// agenda propia de eventos (en nativo, la misma cola en el update); se vacía al cambiar de partida
+let agenda = [], generacion = 0;
+function programar(seg, fn) { agenda.push({ t: tAhora + seg, fn, gen: generacion }); }
+function correrAgenda() {
+  const listos = agenda.filter(e => e.gen === generacion && tAhora >= e.t).sort((a, b) => a.t - b.t);
+  agenda = agenda.filter(e => e.gen === generacion && tAhora < e.t);
+  listos.forEach(e => { if (e.gen === generacion) try { e.fn(); } catch (err) { console.error(err); } });
+}
+function cambiarEstado(e) { estado = e; tEstado = tAhora; }
+// el reloj de los cuadros puede quedarse atrás si la pestaña estuvo quieta; para la inactividad se usa el reloj real
+function marcarActividad() { ultimaActividad = Math.max(tAhora, performance.now() / 1000); }
+
+/* Piezas en pantalla: posición del centro de la pieza (unidades del escenario), escala, giro y animación */
+const escBandeja = () => LY.juego.bandeja.esc;
+function lugarBandeja(k) { const b = LY.juego.bandeja, cols = b.cols, filas = Math.ceil(PIEZAS / cols), pad = 24;   // margen para que las pestañas no salgan de la toalla
+  const f = Math.floor(k / cols), enFila = Math.min(cols, PIEZAS - f * cols), c = k - f * cols, sw = (b.w - 2 * pad) / cols, sh = (b.h - 2 * pad) / filas;   // filas completas, la última centrada
+  return { x: b.x + b.w / 2 + (c - (enFila - 1) / 2) * sw, y: b.y + pad + (f + .5) * sh, sw, sh }; }
+function casaDe(i) { const v = vis[i], b = LY.juego.bandeja;
+  if (v.libre) return { x: b.x + v.libre.fx * b.w, y: b.y + v.libre.fy * b.h, rot: v.libre.rot };
+  const k = partida.bandeja.indexOf(i), l = lugarBandeja(k), d = partida.desorden[k];
+  // con 25 piezas cada una tiene su lugar fijo en la toalla, sin desorden, para que ninguna pestaña tape a otra
+  return { x: l.x, y: l.y, rot: d.giro * .25 }; }
+function animar(v, x1, y1, e1, r1, dur, o = {}) {
+  v.anim = { x0: v.x, y0: v.y, e0: v.esc, r0: v.rot, x1, y1, e1, r1, t0: tAhora + (o.retraso || 0), dur, arco: o.arco || 0, fin: o.fin, ease: o.ease || easeInOut, listo: false };
+}
+function arrancarAnim(v) { const a = v.anim; if (!a.listo) { a.listo = true; a.x0 = v.x; a.y0 = v.y; a.e0 = v.esc; a.r0 = v.rot; } }
+function actualizarPiezas(dt) {
+  for (const v of vis) {
+    if (arrastre && arrastre.i === v.i) { const q = 1 - Math.exp(-dt * 14); v.esc = lerp(v.esc, 1.06, q); v.rot = lerp(v.rot, 0, q);
+      const k = v.esc / arrastre.e0; v.x = arrastre.px - arrastre.ox * k; v.y = arrastre.py - arrastre.oy * k; continue; }
+    const a = v.anim; if (!a) continue; const k = (tAhora - a.t0) / a.dur; if (k < 0) continue;
+    arrancarAnim(v); const u = clamp(k, 0, 1), e = a.ease(u);
+    v.x = lerp(a.x0, a.x1, e); v.y = lerp(a.y0, a.y1, e) - Math.sin(Math.PI * u) * a.arco; v.esc = lerp(a.e0, a.e1, e); v.rot = lerp(a.r0, a.r1, e);
+    if (k >= 1) { v.anim = null; if (a.fin) a.fin(); }
+  }
+}
+const aTope = i => { zorden = zorden.filter(k => k !== i); zorden.push(i); };
+
+function irAInicio() {
+  generacion++; agenda = []; partida = null; J = null; vis = []; arrastre = null; festejo = false; cartel = null; salidaEn = -1;
+  particulas.length = 0; textos.length = 0; demo = nuevaDemo(); cambiarEstado('inicio'); marcarActividad();
+}
+function empezar() {
+  generacion++; agenda = []; arrastre = null; marcarActividad();
+  partida = LG.crearPartida(nuevaSemilla(), imagenAnterior);
+  if (FORZADA && imagenAnterior == null) partida.imagen = FORZADA;
+  imagenAnterior = partida.imagen;
+  J = hornearSet(partida.imagen, partida.cortes, LADO, true);
+  const T = LY.juego.tablero;
+  vis = partida.piezas.map((_, i) => { const c = LG.centroCelda(T, i); return { i, x: c.x, y: c.y, esc: 1, rot: 0, anim: null, error: -9, pop: -9, libre: null, bloqueada: false, fantasma: false }; });
+  zorden = partida.bandeja.slice();
+  festejo = false; cartel = null; motivoFin = ''; salidaEn = -1; tCuenta = Infinity; tMezcla = -9; tVictoria = -9; ultimoTic = -1; particulas.length = 0; textos.length = 0;
+  cambiarEstado('entrada'); SFX.abanico();
+  programar(.6, iniciarVista);
+}
+// vista previa: la imagen armada con una cuenta de 3; luego las piezas saltan a la toalla
+function iniciarVista() {
+  cambiarEstado('vista'); tCuenta = tAhora;
+  for (let n = VISTA; n >= 1; n--) programar(VISTA - n, () => SFX.cuenta(n));
+  programar(VISTA, mezclar);
+}
+function mezclar() {
+  if (estado !== 'vista') return;
+  cambiarEstado('mezcla'); tMezcla = tAhora; SFX.repartir();
+  partida.bandeja.forEach((i, k) => { const h = casaDe(i); aTope(i);
+    animar(vis[i], h.x, h.y, escBandeja(), h.rot, .55, { retraso: .15 + k * .04, arco: 150, ease: easeOut });
+    if (k % 3 === 0) programar(.15 + k * .04 + .5, () => SFX.caer(0)); });
+  programar(.15 + (PIEZAS - 1) * .04 + .6, () => {
+    LG.terminarVista(partida); cambiarEstado('juego'); SFX.ya();
+    const T = LY.juego.tablero; cartel = { s: '¡A jugar!', t0: tAhora, dur: 1.1, color: C.rojo, x: T.x + T.lado / 2, y: T.y + T.lado / 2, fs: 130 };
+  });
+}
+
+/* ======================= Jugadas ======================= */
+function soltarPieza(i) {
+  const v = vis[i], T = LY.juego.tablero; arrastre = null;
+  const celda = LG.celdaEn(T, v.x, v.y, .15);
+  const r = LG.soltar(partida, i, celda);
+  if (r.tipo === 'ignorado') return;                 // la partida terminó con la pieza en la mano
+  aTope(i);
+  if (r.tipo === 'encaje') { const c = LG.centroCelda(T, i); v.libre = null;   // el imán la lleva a su lugar
+    animar(v, c.x, c.y, 1, 0, .16, { ease: easeOut, fin: () => encajo(i, r) }); return; }
+  if (r.tipo === 'error') {
+    v.error = tAhora; v.bloqueada = true; tVida = tAhora; SFX.error(); programar(.06, SFX.vida);
+    if (partida.estado === 'perdida') { programar(1.0, () => terminar('errores')); return; }
+    programar(.55, () => aCasa(v)); return; }
+  if (r.tipo === 'libre') { const b = LY.juego.bandeja;
+    if (v.x > b.x && v.x < b.x + b.w && v.y > b.y && v.y < b.y + b.h) {   // la deja en otro sitio de la toalla
+      const mx = 90, my = 90, x = clamp(v.x, b.x + mx, b.x + b.w - mx), y = clamp(v.y, b.y + my, b.y + b.h - my), rot = (Math.random() - .5) * .14;
+      v.libre = { fx: (x - b.x) / b.w, fy: (y - b.y) / b.h, rot }; SFX.dejar();
+      animar(v, x, y, escBandeja(), rot, .2, { ease: easeOut }); return; } }
+  aCasa(v);                                           // casilla ocupada o fuera de todo: vuelve a la toalla
+}
+function aCasa(v) { const h = casaDe(v.i); SFX.volver(); v.bloqueada = true;
+  animar(v, h.x, h.y, escBandeja(), h.rot, .45, { arco: 90, fin: () => { v.bloqueada = false; } }); }
+function encajo(i, r) {
+  const v = vis[i], c = LG.centroCelda(LY.juego.tablero, i); v.pop = tAhora; saltoBebe = tAhora;
+  SFX.encaje(r.colocadas - 1); chispas(c.x, c.y, 12); particulas.push({ t: 'anillo', x: c.x, y: c.y, r: J.cel * .45, vida: 1, color: '#FFFFFF' });
+  const T = LY.juego.tablero, el = ELOGIOS[(r.colocadas + partida.semilla) % ELOGIOS.length];
+  textos.push({ s: el, x: clamp(c.x, T.x + 200, T.x + T.lado - 200), y: Math.max(T.y + 60, c.y - J.cel * .55), t0: tAhora, color: [C.rojo, '#1E7BE0', C.verde, '#8A56D6', '#E8488F', '#0E9C9C'][r.colocadas % 6], fs: 70 });
+  if (partida.estado === 'ganada') programar(.45, () => terminar('victoria'));
+}
+function terminar(motivo) {
+  if (estado === 'fin' || estado === 'resultado') return;
+  motivoFin = motivo; cambiarEstado('fin'); arrastre = null;
+  const T = LY.juego.tablero, cx = T.x + T.lado / 2, cy = T.y + T.lado / 2;
+  if (motivo === 'victoria') {
+    festejo = true; tVictoria = tAhora; SFX.victoria(); confeti(160);
+    cartel = { s: '¡Lo lograste!', t0: tAhora + .35, dur: 2.0, color: C.rojo, x: cx, y: cy };
+    programar(2.5, () => { salidaEn = tAhora; }); programar(3.05, aResultado);
+  } else {
+    SFX.derrota();
+    // las piezas que faltaban van a su lugar, tenues, para que se vea cómo quedaba
+    const sueltas = vis.filter(v => !partida.piezas[v.i].colocada);
+    sueltas.forEach((v, k) => { v.fantasma = true; v.bloqueada = true; const c = LG.centroCelda(T, v.i);
+      animar(v, c.x, c.y, 1, 0, .55, { retraso: .45 + k * .06, arco: 80, fin: () => { if (k % 3 === 0) SFX.caer(0); } }); });
+    cartel = { s: motivo === 'tiempo' ? '¡Se acabó el tiempo!' : '¡Casi lo logras!', t0: tAhora + .2, dur: 2.4, color: C.azul, x: cx, y: T.y + J.cel * .5 };
+    const fin = .45 + sueltas.length * .06 + .55 + 1.3;
+    programar(fin, () => { salidaEn = tAhora; }); programar(fin + .55, aResultado);
+  }
+}
+function aResultado() { cambiarEstado('resultado'); marcarActividad(); }
+
+/* ======================= Entrada táctil ======================= */
+function aEscenario(e) { const r = lienzo.getBoundingClientRect(); return { x: (e.clientX - r.left) / escala, y: (e.clientY - r.top) / escala }; }
+const dentro = (p, r, m = 0) => p.x >= r.x - m && p.x <= r.x + r.w + m && p.y >= r.y - m && p.y <= r.y + r.h + m;
+// la pieza de más arriba bajo el dedo (se mira el cuerpo de la pieza con un poco de margen por las pestañas)
+function piezaEn(p) {
+  for (let k = zorden.length - 1; k >= 0; k--) { const v = vis[zorden[k]];
+    if (partida.piezas[v.i].colocada || v.anim || v.bloqueada) continue;
+    const dx = p.x - v.x, dy = p.y - v.y, co = Math.cos(-v.rot), si = Math.sin(-v.rot);
+    const lx = (dx * co - dy * si) / v.esc, ly = (dx * si + dy * co) / v.esc, lim = J.cel / 2 + J.cel * .16;
+    if (Math.abs(lx) <= lim && Math.abs(ly) <= lim) return v; }
+  return null;
+}
+lienzo.addEventListener('pointerdown', e => {
+  e.preventDefault(); iniciarAudio(); marcarActividad();
+  const p = aEscenario(e);
+  const b = botones.find(b => b.activo && dentro(p, b));
+  if (b) { botonApretado = b; b.apretadoEn = tAhora; try { lienzo.setPointerCapture(e.pointerId); } catch (_) {} return; }
+  if (estado !== 'juego' || arrastre) return;
+  const v = piezaEn(p); if (!v) return;
+  if (LG.tomar(partida, v.i).tipo !== 'tomada') return;
+  arrastre = { i: v.i, pid: e.pointerId, ox: p.x - v.x, oy: p.y - v.y, px: p.x, py: p.y, e0: v.esc };
+  aTope(v.i); SFX.tomar(); try { lienzo.setPointerCapture(e.pointerId); } catch (_) {}
+});
+lienzo.addEventListener('pointermove', e => {
+  if (!arrastre || e.pointerId !== arrastre.pid) return;
+  const p = aEscenario(e); arrastre.px = clamp(p.x, 0, W); arrastre.py = clamp(p.y, 0, H); marcarActividad();
+});
+function soltar(e) {
+  if (arrastre && e.pointerId === arrastre.pid) { marcarActividad(); soltarPieza(arrastre.i); return; }
+  if (!botonApretado) return; const b = botonApretado, p = aEscenario(e); botonApretado = null;
+  if (dentro(p, b, 20)) { SFX.boton(); b.accion(); }
+}
+lienzo.addEventListener('pointerup', soltar);
+lienzo.addEventListener('pointercancel', e => { botonApretado = null; if (arrastre && e.pointerId === arrastre.pid) soltarPieza(arrastre.i); });
+
+/* ======================= Partículas ======================= */
+function chispas(x, y, n) { for (let i = 0; i < n; i++) { const a = Math.random() * 6.28, v = 140 + Math.random() * 280;
+  particulas.push({ t: 'chispa', x, y, vx: Math.cos(a) * v, vy: Math.sin(a) * v - 60, r: 9 + Math.random() * 11, vida: 1, dec: 1.3 + Math.random(), rot: Math.random() * 6,
+    color: Math.random() < .5 ? '#FFFFFF' : '#FFE27A' }); } }
+const COLORES_CONFETI = [C.rojo, C.azul, '#FFFFFF', '#FFC93C', '#5DBB45', '#3AA6EA', '#E8488F'];
+function confeti(n) { for (let i = 0; i < n; i++) particulas.push({ t: 'confeti', x: Math.random() * W, y: -40 - Math.random() * H * .5, vx: (Math.random() - .5) * 120,
+  vy: 120 + Math.random() * 220, r: 14 + Math.random() * 12, vida: 1, dec: .14, rot: Math.random() * 6, vr: (Math.random() - .5) * 8, fase: Math.random() * 6, color: COLORES_CONFETI[i % COLORES_CONFETI.length] }); }
+function actualizarParticulas(dt) {
+  for (let i = particulas.length - 1; i >= 0; i--) { const p = particulas[i];
+    if (p.t === 'anillo') { p.vida -= dt * 2.5; if (p.vida <= 0) particulas.splice(i, 1); continue; }
+    p.x += p.vx * dt; p.y += p.vy * dt; p.vida -= p.dec * dt;
+    if (p.t === 'chispa') { p.vx *= .93; p.vy = p.vy * .93 + 300 * dt; p.rot += dt * 4; }
+    if (p.t === 'confeti') { p.vy = Math.min(p.vy + 80 * dt, 360); p.vx += Math.sin(tAhora * 2 + p.fase) * 30 * dt; p.rot += p.vr * dt; p.fase += dt * 7; }
+    if (p.vida <= 0 || p.y > H + 60) particulas.splice(i, 1);
+  }
+}
+function dibujarParticulas() {
+  for (const p of particulas) {
+    ctx.save();
+    if (p.t === 'anillo') { ctx.globalAlpha = p.vida; ctx.strokeStyle = p.color; ctx.lineWidth = 6; ctx.beginPath(); ctx.arc(p.x, p.y, p.r * (1 + (1 - p.vida) * .8), 0, 6.29); ctx.stroke(); }
+    else if (p.t === 'chispa') { ctx.globalAlpha = clamp(p.vida * 2, 0, 1); ctx.fillStyle = p.color; ctx.translate(p.x, p.y); ctx.rotate(p.rot); estrella4(ctx, 0, 0, p.r * (.6 + p.vida * .4)); ctx.fill(); }
+    else if (p.t === 'confeti') { ctx.globalAlpha = clamp(p.vida * 3, 0, 1); ctx.fillStyle = p.color; ctx.translate(p.x, p.y); ctx.rotate(p.rot); ctx.scale(Math.cos(p.fase), 1);
+      ctx.fillRect(-p.r / 2, -p.r / 4, p.r, p.r / 2); }
+    ctx.restore();
+  }
+}
+
+/* ======================= Ambiente animado ======================= */
+const amb = { nubes: [], gaviotas: [], destellos: [], proxOla: 0, proxGaviota: 0 };
+function prepararAmbiente() {
+  const rnd = mulberry32(3); amb.nubes.length = amb.destellos.length = 0;
+  for (let i = 0; i < 5; i++) amb.nubes.push({ x: rnd() * W, y: (O === 'v' ? 40 + rnd() * (LY.mar - 340) : 20 + rnd() * 260), k: .4 + rnd() * .55, v: 6 + rnd() * 10 });
+  amb.gaviotas = O === 'v' ? [{ cx: 540, ax: 480, cy: 1420, ay: 30, w: .11, f: 0, s: 1 }, { cx: 640, ax: 420, cy: 1460, ay: 24, w: .14, f: 2.5, s: .8 }]
+    : [{ cx: 240, ax: 200, cy: 340, ay: 24, w: .12, f: 0, s: .9 }, { cx: 1560, ax: 300, cy: 260, ay: 20, w: .1, f: 2, s: .8 }];
+  for (let i = 0; i < 14; i++) amb.destellos.push({ x: rnd() * W, y: LY.mar + 20 + rnd() * (LY.arena - LY.mar - 40), f: rnd() * 6, v: .8 + rnd() * 1.4 });
+}
+function dibujarFondo(dt) {
+  ctx.drawImage(H_.fondo, 0, 0, W, H);
+  // olitas que se mueven sobre el mar
+  ctx.strokeStyle = 'rgba(255,255,255,.45)'; ctx.lineWidth = 4; ctx.lineCap = 'round';
+  for (let f = 0; f < 4; f++) { const y = LY.mar + 40 + f * (LY.arena - LY.mar - 60) / 4, paso = 150, off = (tAhora * (14 + f * 5) + f * 60) % paso;
+    for (let x = -paso + off; x < W; x += paso) { ctx.beginPath(); ctx.moveTo(x, y); ctx.quadraticCurveTo(x + 20, y - 9, x + 40, y); ctx.quadraticCurveTo(x + 60, y + 9, x + 80, y); ctx.stroke(); } }
+  // destellos del sol en el agua
+  ctx.fillStyle = '#FFFFFF';
+  for (const d of amb.destellos) { const a = Math.max(0, Math.sin(tAhora * d.v + d.f)); if (a < .05) continue; ctx.globalAlpha = a * .85; estrella4(ctx, d.x, d.y, 6 + a * 8); ctx.fill(); }
+  ctx.globalAlpha = 1;
+  for (const n of amb.nubes) { n.x += n.v * dt; const w = H_.nubeW * n.k; if (n.x > W + 20) n.x = -w - 20;
+    ctx.globalAlpha = .92; ctx.drawImage(H_.nube, n.x, n.y, w, H_.nubeH * n.k); ctx.globalAlpha = 1; }
+}
+function dibujarSombrilla(s) {   // sombrilla de playa con los colores de la marca
+  if (!s) return; const { x, y, r } = s, osc = Math.sin(tAhora * 1.1) * .03;
+  ctx.save(); ctx.translate(x, y); ctx.rotate(-.12 + osc);
+  ctx.strokeStyle = '#8A5A2B'; ctx.lineWidth = r * .08; ctx.lineCap = 'round'; ctx.beginPath(); ctx.moveTo(0, -r * .1); ctx.lineTo(0, r * 1.8); ctx.stroke();
+  for (let k = 0; k < 6; k++) { const a0 = Math.PI + k * Math.PI / 6, a1 = a0 + Math.PI / 6;
+    ctx.beginPath(); ctx.moveTo(0, 0); ctx.arc(0, 0, r, a0, a1); ctx.closePath(); ctx.fillStyle = k % 2 ? '#FFFFFF' : C.rojo; ctx.fill(); }
+  ctx.lineWidth = 4; ctx.strokeStyle = 'rgba(110,0,10,.5)'; ctx.beginPath(); ctx.arc(0, 0, r, Math.PI, 0); ctx.stroke();
+  ctx.fillStyle = C.azul; ctx.beginPath(); ctx.arc(0, -r * .02, r * .09, 0, 6.29); ctx.fill();
+  ctx.restore();
+}
+function dibujarGaviotas() {
+  ctx.save(); ctx.strokeStyle = '#2B4A6F'; ctx.lineWidth = 5; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+  for (const g of amb.gaviotas) { const t = tAhora, x = g.cx + Math.sin(t * g.w + g.f) * g.ax, y = g.cy + Math.sin(t * g.w * 3 + g.f) * g.ay, al = Math.sin(t * 6 + g.f) * 10 * g.s, s = 26 * g.s;
+    ctx.beginPath(); ctx.moveTo(x - s, y - al * .5); ctx.quadraticCurveTo(x - s * .5, y - s * .5 - al, x, y); ctx.quadraticCurveTo(x + s * .5, y - s * .5 - al, x + s, y - al * .5); ctx.stroke(); }
+  ctx.restore();
+}
+
+/* ======================= Piezas, tablero y toalla ======================= */
+// dibuja la pieza i de un juego horneado, centrada en (x, y)
+function dibujarPieza(set, i, x, y, esc, rot, o = {}) {
+  const P = set.piezas[i], tam = set.tam, lift = o.lift || 0, alfa = o.alfa ?? 1;
+  if (esc <= .01 || alfa <= 0) return;
+  if (o.sombra !== false) { const ts = tam + 2 * set.ms;
+    ctx.save(); ctx.globalAlpha = alfa * (.32 + .16 * lift); ctx.translate(x + 3 + 10 * lift, y + 6 + 20 * lift); ctx.rotate(rot); ctx.scale(esc, esc);
+    ctx.drawImage(P.sombra, -ts / 2, -ts / 2, ts, ts); ctx.restore(); }
+  ctx.save(); ctx.globalAlpha = alfa; ctx.translate(x, y); ctx.rotate(rot); ctx.scale(esc, esc);
+  ctx.drawImage(P.plana, -tam / 2, -tam / 2, tam, tam);
+  const rel = o.relieve ?? 1; if (rel > 0) { ctx.globalAlpha = alfa * rel; ctx.drawImage(P.relieve, -tam / 2, -tam / 2, tam, tam); }
+  if (o.borde && o.borde.a > 0) { ctx.globalAlpha = o.borde.a; ctx.translate(-(i % N + .5) * set.cel, -(Math.floor(i / N) + .5) * set.cel);
+    trazarPieza(ctx, set.cortes, i, set.cel); ctx.lineJoin = 'round'; ctx.lineWidth = o.borde.w; ctx.strokeStyle = o.borde.color; ctx.stroke(); }
+  ctx.restore();
+}
+function dibujarToalla(k) { const b = LY.juego.bandeja; if (k <= 0) return;
+  ctx.save(); ctx.translate(b.x + b.w / 2, b.y + b.h / 2); ctx.scale(k, k); ctx.drawImage(H_.toalla, -b.w / 2 - 20, -b.h / 2 - 20, b.w + 40, b.h + 40); ctx.restore(); }
+function dibujarTablero() {
+  const T = LY.juego.tablero, te = tAhora - tEstado;
+  let k = estado === 'entrada' ? easeBack(te / .45) : 1;
+  if (salidaEn >= 0) k *= 1 - easeIn((tAhora - salidaEn) / .45);
+  if (tVictoria > 0) { const d = tAhora - tVictoria - .15; if (d > 0 && d < .6) k *= 1 + Math.sin(d / .6 * Math.PI) * .04; }
+  if (k <= .01) return;
+  const cx = T.x + T.lado / 2, cy = T.y + T.lado / 2, tb = J.tablero, tt = T.lado + 2 * tb.mg + 20;
+  ctx.save(); ctx.translate(cx, cy); ctx.scale(k, k); ctx.translate(-cx, -cy);
+  ctx.drawImage(tb.cv, T.x - tb.mg - tb.dx, T.y - tb.mg - tb.dy, tt, tt);
+  // casilla bajo la pieza que se arrastra (no dice si es la correcta)
+  if (arrastre) { const v = vis[arrastre.i], c = LG.celdaEn(T, v.x, v.y, .15);
+    if (c >= 0 && !partida.piezas[c].colocada) { const x = T.x + (c % N) * J.cel, y = T.y + Math.floor(c / N) * J.cel;
+      rr(ctx, x + 5, y + 5, J.cel - 10, J.cel - 10, 16); ctx.fillStyle = 'rgba(255,255,255,.55)'; ctx.fill(); ctx.lineWidth = 5; ctx.strokeStyle = '#FFFFFF'; ctx.stroke(); } }
+  // piezas ya armadas: el relieve se va suavizando para que la imagen se vea entera
+  for (const v of vis) { if (!partida.piezas[v.i].colocada || v.anim) continue; const c = LG.centroCelda(T, v.i);
+    const dp = tAhora - v.pop; let esc = 1; if (dp < .4) esc = 1 + Math.sin(dp / .4 * Math.PI) * .07;
+    if (dp < 1) { const s = J.cel * (1.7 + .5 * easeOut(dp)); ctx.save(); ctx.globalAlpha = (1 - dp) * .8; ctx.drawImage(H_.halo, c.x - s / 2, c.y - s / 2, s, s); ctx.restore(); }
+    let rel = lerp(1, .25, clamp((dp - .5) / .8, 0, 1)); if (tVictoria > 0) rel *= 1 - clamp((tAhora - tVictoria) / .6, 0, 1);
+    dibujarPieza(J, v.i, c.x, c.y, esc, 0, { sombra: false, relieve: rel, borde: { a: clamp(1 - dp / .9, 0, 1), w: 9, color: C.oro } }); }
+  // franja de luz al completar
+  if (tVictoria > 0) { const d = (tAhora - tVictoria - .2) / .9; if (d > 0 && d < 1) {
+    ctx.save(); ctx.beginPath(); ctx.rect(T.x, T.y, T.lado, T.lado); ctx.clip(); ctx.translate(lerp(T.x - 300, T.x + T.lado + 300, d), cy); ctx.rotate(-.5);
+    ctx.drawImage(H_.franja, -110, -T.lado, 220, T.lado * 2); ctx.restore(); } }
+  ctx.restore();
+}
+function dibujarSueltas() {
+  const salida = salidaEn >= 0 ? 1 - easeIn((tAhora - salidaEn) / .45) : 1;
+  const vistaArmada = estado === 'entrada' || estado === 'vista', ke = estado === 'entrada' ? easeBack((tAhora - tEstado) / .45) : 1;
+  const T = LY.juego.tablero;
+  for (const i of zorden) { const v = vis[i];
+    if (partida.piezas[i].colocada && !v.anim) continue;
+    if (arrastre && arrastre.i === i) continue;
+    let x = v.x, y = v.y, esc = v.esc * salida, rot = v.rot;
+    if (ke !== 1) { const cx = T.x + T.lado / 2, cy = T.y + T.lado / 2; x = cx + (x - cx) * ke; y = cy + (y - cy) * ke; esc *= ke; }
+    const de = tAhora - v.error; let borde = null;
+    if (de < .55) { x += Math.sin(de * 46) * 16 * Math.exp(-de * 6); rot += Math.sin(de * 38) * .04 * Math.exp(-de * 6); }
+    if (de < 1) borde = { a: (1 - easeIn(de)) * (.75 + .25 * Math.sin(tAhora * 30)), w: 10, color: C.rojo };
+    const volando = v.anim && tAhora >= v.anim.t0 ? Math.sin(Math.PI * clamp((tAhora - v.anim.t0) / v.anim.dur, 0, 1)) : 0;
+    dibujarPieza(J, i, x, y, esc, rot, { relieve: vistaArmada ? .3 : 1, sombra: !vistaArmada, lift: volando * .6, alfa: v.fantasma ? .6 : 1, borde }); }
+  if (arrastre) { const v = vis[arrastre.i]; dibujarPieza(J, v.i, v.x, v.y, v.esc, v.rot, { lift: 1 }); }
+}
+
+/* ======================= Marcador ======================= */
+function entradaHud(retraso) { if (tMezcla < 0) return 0; return easeBack((tAhora - tMezcla - retraso) / .45); }
+function dibujarReloj() {
+  const r = LY.juego.reloj, t = partida.tiempo, seg = Math.ceil(t - 1e-6), urgente = t <= 10 && estado === 'juego';
+  const k = entradaHud(.1); if (k <= 0) return;
+  const latido = urgente ? 1 + .08 * Math.pow(1 - (t % 1), 3) : 1;
+  ctx.save(); ctx.translate(r.x + r.w / 2, r.y + r.h / 2); ctx.scale(k * latido, k * latido); ctx.translate(-r.w / 2, -r.h / 2);
+  rr(ctx, 0, 7, r.w, r.h, r.h / 2); ctx.fillStyle = 'rgba(0,40,100,.2)'; ctx.fill();
+  rr(ctx, 0, 0, r.w, r.h, r.h / 2); ctx.fillStyle = '#FFFFFF'; ctx.fill(); ctx.lineWidth = 6; ctx.strokeStyle = urgente ? C.rojo : C.azul; ctx.stroke();
+  const cx = r.h * .55, cy = r.h * .47, rad = r.h * .3;
+  ctx.fillStyle = urgente ? C.rojo : C.azul; ctx.beginPath(); ctx.arc(cx, cy, rad, 0, 6.29); ctx.fill();
+  ctx.fillStyle = '#FFFFFF'; ctx.beginPath(); ctx.arc(cx, cy, rad * .78, 0, 6.29); ctx.fill();
+  const a = -Math.PI / 2 + (1 - t / TIEMPO) * Math.PI * 2;
+  ctx.strokeStyle = urgente ? C.rojo : C.azul; ctx.lineCap = 'round'; ctx.lineWidth = 5; ctx.beginPath(); ctx.moveTo(cx, cy); ctx.lineTo(cx + Math.cos(a) * rad * .6, cy + Math.sin(a) * rad * .6); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(cx, cy); ctx.lineTo(cx, cy - rad * .45); ctx.stroke();
+  const mm = Math.floor(seg / 60), ss = String(seg % 60).padStart(2, '0');
+  texto(`${mm}:${ss}`, r.h * .98 + (r.w - r.h * 1.1) / 2, r.h * .44, { fs: r.h * .52, color: urgente ? C.rojo : C.tinta });
+  const bx = r.h * 1.0, bw = r.w - r.h * 1.0 - r.h * .32, by = r.h * .76, bh = r.h * .12, f = clamp(t / TIEMPO, 0, 1);
+  rr(ctx, bx, by, bw, bh, bh / 2); ctx.fillStyle = '#E3EAF4'; ctx.fill();
+  if (f > 0) { rr(ctx, bx, by, Math.max(bh, bw * f), bh, bh / 2); ctx.fillStyle = f > .5 ? '#22A356' : f > 10 / TIEMPO ? '#F2A516' : C.rojo; ctx.fill(); }
+  ctx.restore();
+}
+function dibujarVidas() {
+  const v = LY.juego.vidas, s = Math.min(v.h * .95, v.w / 3.3), paso = v.w / 3, errores = partida.errores;
+  for (let i = 0; i < ERRORES_MAX; i++) {
+    const k = entradaHud(.2 + i * .08); if (k <= 0) continue;
+    const cx = v.x + paso * (i + .5), cy = v.y + v.h / 2, viva = i < ERRORES_MAX - errores;
+    ctx.save(); ctx.translate(cx, cy); ctx.scale(k, k);
+    if (viva) { const lat = 1 + .04 * Math.sin(tAhora * 3 + i);
+      ctx.scale(lat, lat); corazon(ctx, 0, 6, s); ctx.fillStyle = 'rgba(0,30,90,.22)'; ctx.fill();
+      corazon(ctx, 0, 0, s); ctx.fillStyle = C.rojo; ctx.fill(); ctx.lineWidth = 6; ctx.strokeStyle = '#FFFFFF'; ctx.stroke();
+      ctx.fillStyle = 'rgba(255,255,255,.55)'; ctx.beginPath(); ctx.ellipse(-s * .2, -s * .14, s * .1, s * .06, -.6, 0, 6.29); ctx.fill(); }
+    else { corazon(ctx, 0, 0, s); ctx.fillStyle = 'rgba(255,255,255,.55)'; ctx.fill(); ctx.lineWidth = 5; ctx.strokeStyle = C.gris; ctx.stroke(); }
+    ctx.restore();
+    // corazón que se pierde: salta, tiembla y cae
+    if (!viva && i === ERRORES_MAX - errores) { const dt = tAhora - tVida; if (dt < 1.1) {
+      ctx.save(); const sube = dt < .3 ? -dt * 120 : -36 + (dt - .3) * (dt - .3) * 900; ctx.translate(cx + Math.sin(dt * 40) * 8 * Math.max(0, .3 - dt) * 3 + dt * 60, cy + sube);
+      ctx.rotate(dt * 3); ctx.globalAlpha = clamp(1.2 - dt, 0, 1); corazon(ctx, 0, 0, s * 1.05); ctx.fillStyle = C.rojo; ctx.fill(); ctx.lineWidth = 6; ctx.strokeStyle = '#FFFFFF'; ctx.stroke(); ctx.restore(); } }
+  }
+}
+// la imagen completa siempre a la vista, en un cuadrito con su cinta «ASÍ QUEDA»
+function dibujarMuestra() {
+  const m = LY.juego.muestra, k = entradaHud(0); if (k <= 0) return;
+  ctx.save(); ctx.translate(m.x + m.lado / 2, m.y + m.lado / 2); ctx.scale(k, k); ctx.rotate(Math.sin(tAhora * 1.2) * .01); ctx.translate(-m.lado / 2, -m.lado / 2);
+  rr(ctx, 0, 8, m.lado, m.lado, 26); ctx.fillStyle = 'rgba(0,40,100,.22)'; ctx.fill();
+  rr(ctx, 0, 0, m.lado, m.lado, 26); ctx.fillStyle = '#FFFFFF'; ctx.fill(); ctx.lineWidth = 6; ctx.strokeStyle = C.azul; ctx.stroke();
+  ctx.save(); rr(ctx, 12, 12, m.lado - 24, m.lado - 24, 16); ctx.clip(); ctx.drawImage(J.lamina, 12, 12, m.lado - 24, m.lado - 24); ctx.restore();
+  const w = m.lado * .7, h = 42; rr(ctx, (m.lado - w) / 2, -h / 2 + 2, w, h, h / 2); ctx.fillStyle = C.rojo; ctx.fill(); ctx.lineWidth = 4; ctx.strokeStyle = '#FFFFFF'; ctx.stroke();
+  texto('ASÍ QUEDA', m.lado / 2, 3, { fs: 28, color: '#FFFFFF', max: w - 20 });
+  ctx.restore();
+}
+function dibujarContador() {
+  const r = LY.juego.contador, k = entradaHud(.3); if (k <= 0) return;
+  const n = partida.colocadas, ultimo = vis.reduce((m, v) => Math.max(m, v.pop), -9), ul = 1 + .2 * Math.max(0, 1 - (tAhora - ultimo) / .4);
+  ctx.save(); ctx.translate(r.x + r.w / 2, r.y + r.h / 2); ctx.scale(k, k); ctx.translate(-r.w / 2, -r.h / 2);
+  rr(ctx, 0, 7, r.w, r.h, 30); ctx.fillStyle = 'rgba(0,40,100,.2)'; ctx.fill();
+  rr(ctx, 0, 0, r.w, r.h, 30); ctx.fillStyle = '#FFFFFF'; ctx.fill(); ctx.lineWidth = 6; ctx.strokeStyle = C.azul; ctx.stroke();
+  if (r.h < 100) {   // en una sola línea
+    texto('PIEZAS', r.w * .36, r.h / 2 + 2, { fs: 34, color: C.tinta });
+    ctx.save(); ctx.translate(r.w * .72, r.h / 2 + 2); ctx.scale(ul, ul); texto(`${n} / ${PIEZAS}`, 0, 0, { fs: 48, color: C.rojo }); ctx.restore();
+  } else {
+    texto('PIEZAS', r.w / 2, r.h * .27, { fs: 30, color: C.tinta });
+    ctx.save(); ctx.translate(r.w / 2, r.h * .66); ctx.scale(ul, ul); texto(`${n} / ${PIEZAS}`, 0, 0, { fs: 54, color: C.rojo, max: r.w - 24 }); ctx.restore();
+  }
+  ctx.restore();
+}
+function dibujarAyuda() {
+  const a = LY.juego.ayuda; if (!a) return; const k = entradaHud(.4); if (k <= 0) return;
+  ctx.save(); ctx.globalAlpha = clamp(k, 0, 1);
+  a.lineas.forEach((ln, i) => texto(ln, a.x, a.y + i * a.lh, { fs: a.fs, peso: 600, color: C.tinta, borde: 10, colorBorde: 'rgba(255,255,255,.9)' }));
+  // flechita que señala el tablero
+  const y = a.y + a.lineas.length * a.lh + 20, dx = Math.sin(tAhora * 3) * 8;
+  ctx.fillStyle = C.rojo; ctx.strokeStyle = '#FFFFFF'; ctx.lineWidth = 5; ctx.beginPath(); ctx.moveTo(a.x - 40 + dx, y - 16); ctx.lineTo(a.x + 20 + dx, y - 16); ctx.lineTo(a.x + 20 + dx, y - 34);
+  ctx.lineTo(a.x + 60 + dx, y); ctx.lineTo(a.x + 20 + dx, y + 34); ctx.lineTo(a.x + 20 + dx, y + 16); ctx.lineTo(a.x - 40 + dx, y + 16); ctx.closePath(); ctx.stroke(); ctx.fill();
+  ctx.restore();
+}
+// cuenta de la vista previa: 3, 2, 1 con un aro que se vacía
+function dibujarCuenta() {
+  const r = LY.juego.cuenta, k = easeBack((tAhora - tCuenta + .2) / .45); if (k <= 0 || tCuenta === Infinity) return;
+  const resta = clamp(tCuenta + VISTA - tAhora, 0, VISTA), n = Math.max(1, Math.ceil(resta - 1e-6)), f = resta / VISTA;
+  const golpe = resta < VISTA ? 1 + .14 * Math.pow(1 - (resta % 1), 4) : 1;
+  const sale = estado === 'mezcla' ? 1 - easeIn((tAhora - tEstado) / .3) : 1; if (sale <= 0) return;
+  ctx.save(); ctx.translate(r.x + r.w / 2, r.y + r.h / 2); ctx.scale(k * sale, k * sale); ctx.translate(-r.x - r.w / 2, -r.y - r.h / 2);
+  let cx, cy, rad;
+  rr(ctx, r.x, r.y + 7, r.w, r.h, Math.min(r.h / 2, 44)); ctx.fillStyle = 'rgba(0,40,100,.2)'; ctx.fill();
+  rr(ctx, r.x, r.y, r.w, r.h, Math.min(r.h / 2, 44)); ctx.fillStyle = '#FFFFFF'; ctx.fill(); ctx.lineWidth = 6; ctx.strokeStyle = C.azul; ctx.stroke();
+  if (r.h < 200) {
+    texto('¡Mira bien la imagen!', r.x + (r.w - r.h) / 2 + 10, r.y + r.h / 2 + 2, { fs: 50, color: C.tinta, max: r.w - r.h - 70 });
+    cx = r.x + r.w - r.h / 2 - 4; cy = r.y + r.h / 2; rad = r.h * .62;
+  } else {   // caja alta y angosta: el texto arriba y la cuenta debajo
+    texto('¡Mira bien!', r.x + r.w / 2, r.y + 62, { fs: 58, color: C.rojo, borde: 10, colorBorde: '#FFFFFF', max: r.w - 40 });
+    texto('Así queda la imagen', r.x + r.w / 2, r.y + 118, { fs: 32, peso: 600, color: C.tinta, max: r.w - 40 });
+    cx = r.x + r.w / 2; cy = r.y + r.h * .7; rad = 78;
+  }
+  ctx.fillStyle = 'rgba(0,30,90,.25)'; ctx.beginPath(); ctx.arc(cx, cy + 6, rad, 0, 6.29); ctx.fill();
+  ctx.fillStyle = C.azul; ctx.beginPath(); ctx.arc(cx, cy, rad, 0, 6.29); ctx.fill();
+  ctx.lineCap = 'round'; ctx.lineWidth = rad * .16; ctx.strokeStyle = 'rgba(255,255,255,.25)'; ctx.beginPath(); ctx.arc(cx, cy, rad * .8, 0, 6.29); ctx.stroke();
+  ctx.strokeStyle = n <= 1 ? C.oro : '#FFFFFF'; ctx.beginPath(); ctx.arc(cx, cy, rad * .8, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * Math.max(.001, f)); ctx.stroke();
+  ctx.save(); ctx.translate(cx, cy + rad * .04); ctx.scale(golpe, golpe); texto(String(n), 0, 0, { fs: rad * 1.0, color: '#FFFFFF', sombra: 'rgba(0,0,40,.35)' }); ctx.restore();
+  ctx.restore();
+}
+
+/* ======================= Marca, bebé y botones ======================= */
+function dibujarBebe(d, modo) {
+  const im = IM[d.img]; if (!im) return;
+  const a = im.naturalWidth / im.naturalHeight, w = d.w ?? d.h * a, h = d.h ?? d.w / a;
+  let dy = Math.sin(tAhora * 2.1) * 5, rot = Math.sin(tAhora * 1.3) * .015, sy = 1 + Math.sin(tAhora * 2.1) * .008;
+  const ds = tAhora - saltoBebe; if (ds < .55) dy -= Math.sin(ds / .55 * Math.PI) * 34;
+  if (festejo) { const u = (tAhora % .7) / .7; dy -= Math.sin(u * Math.PI) * 46; rot = Math.sin(tAhora * 9) * .05; }
+  if (modo === 'triste') rot = Math.sin(tAhora * 1.5) * .04 - .03;
+  ctx.save(); ctx.globalAlpha = .25 * (1 + dy / 120); ctx.fillStyle = '#8A6A30'; ctx.beginPath(); ctx.ellipse(d.x + w / 2, d.y + h * .97, w * .32, h * .035, 0, 0, 6.29); ctx.fill(); ctx.restore();
+  ctx.save(); ctx.translate(d.x + w / 2, d.y + h); ctx.rotate(rot); ctx.scale(1, sy); ctx.drawImage(im, -w / 2, -h + dy, w, h); ctx.restore();
+}
+function dibujarMarca(cfg) {
+  const p = cfg.producto, im = p && IM.panalAcuatico;   // en la playa, el pañal acuático
+  if (im) { const h = p.w * im.naturalHeight / im.naturalWidth;
+    ctx.save(); ctx.translate(p.x + p.w / 2, p.y + h); ctx.rotate(Math.sin(tAhora * .9) * .02); ctx.drawImage(im, -p.w / 2, -h, p.w, h); ctx.restore(); }
+  // el logo va siempre con su proporción y su color originales (D-022)
+  if (cfg.logo) imagen('logo', cfg.logo.x, cfg.logo.y, cfg.logo.w);
+}
+function registrarBoton(id, x, y, w, h, accion, activo) {
+  let b = botones.find(b => b.id === id); if (!b) { b = { id }; botones.push(b); }
+  Object.assign(b, { x, y, w, h, accion, activo }); return b;
+}
+function boton(id, x, y, w, h, etiqueta, accion, activo = true, entradaK = 1) {
+  const b = registrarBoton(id, x, y, w, h, accion, activo);
+  const apretado = botonApretado === b, resp = 1 + .035 * Math.sin(tAhora * 3.2), k = easeBack(entradaK);
+  if (k <= 0) { b.activo = false; return; }
+  ctx.save(); ctx.translate(x + w / 2, y + h / 2); ctx.scale(k * (apretado ? .96 : resp), k * (apretado ? .96 : resp)); ctx.translate(-w / 2, -h / 2);
+  if (!activo) ctx.globalAlpha = .6;
+  const prof = apretado ? 4 : 12;
+  rr(ctx, 0, 14, w, h, h / 2); ctx.fillStyle = 'rgba(0,30,90,.25)'; ctx.fill();
+  rr(ctx, 0, prof, w, h - 4, h / 2); ctx.fillStyle = C.rojoOsc; ctx.fill();
+  rr(ctx, 0, apretado ? 8 : 0, w, h - 12, h / 2); ctx.fillStyle = C.rojo; ctx.fill(); ctx.lineWidth = 6; ctx.strokeStyle = '#FFFFFF'; ctx.stroke();
+  rr(ctx, h * .3, (apretado ? 8 : 0) + 12, w - h * .6, (h - 12) * .3, (h - 12) * .15); ctx.fillStyle = 'rgba(255,255,255,.25)'; ctx.fill();
+  texto(etiqueta, w / 2, (apretado ? 8 : 0) + (h - 12) / 2 + 2, { fs: h * .42, color: '#FFFFFF', sombra: 'rgba(110,0,10,.45)', max: w - h * .6 });
+  ctx.restore();
+}
+
+/* ======================= Pantallas ======================= */
+function pantallaInicio() {
+  const L = LY.inicio, te = tAhora - tEstado;
+  dibujarSombrilla(L.sombrilla); dibujarMarca(L); dibujarBebe(L.bebe);
+  const t = L.titulo, kt = easeBack((te - .1) / .5);
+  if (kt > 0) { ctx.save(); ctx.translate(t.x, t.y); ctx.scale(kt, kt); ctx.rotate(Math.sin(tAhora * 1.4) * .012);
+    texto('ROMPECABEZAS', 0, 0, { fs: t.fs, color: C.rojo, borde: 18, colorBorde: '#FFFFFF', sombra: 'rgba(0,40,110,.35)', max: O === 'v' ? 1000 : 560 });
+    ctx.restore(); }
+  const s = L.sub, ks = easeBack((te - .25) / .45);
+  if (ks > 0) { ctx.save(); ctx.translate(s.x, s.y); ctx.scale(ks, ks);
+    texto(SUB, 0, 0, { fs: s.fs, color: COLOR_SUB, borde: 14, colorBorde: '#FFFFFF', sombra: 'rgba(0,40,110,.25)' }); ctx.restore(); }
+  const ins = L.instr, ki = clamp((te - .4) / .4, 0, 1);
+  if (ki > 0) { ctx.save(); ctx.globalAlpha = ki;
+    ins.lineas.forEach((ln, i) => texto(ln, ins.x, ins.y + i * ins.lh, { fs: ins.fs, peso: 600, color: C.tinta, borde: 10, colorBorde: 'rgba(255,255,255,.9)', max: O === 'v' ? 1020 : 560 }));
+    ctx.restore(); }
+  if (demo && demo.set) dibujarDemo(te);
+  const b = L.boton; boton('jugar', b.x, b.y, b.w, b.h, 'JUGAR', empezar, true, (te - .5) / .5);
+  if (tAhora - ultimaActividad > INACTIVIDAD) irAInicio();
+}
+/* Demostración del inicio: un dedo lleva dos piezas a su lugar, encajan con brillo y vuelven a salir */
+const CICLO_DEMO = 4.6;
+function nuevaDemo(anterior) {
+  const r = LG.repartir((Math.random() * 1e9) >>> 0, anterior && anterior.imagen);
+  const a = Math.floor(Math.random() * PIEZAS); let b = Math.floor(Math.random() * (PIEZAS - 1)); if (b >= a) b++;
+  const d = { imagen: r.imagen, cortes: r.cortes, a, b, t0: tAhora + .9, ciclo: -1, pop: {}, set: null };
+  if (H_.fondo) d.set = hornearSet(d.imagen, d.cortes, LADO_DEMO, false);
+  return d;
+}
+function posDemo(u) {   // dónde están las dos piezas sueltas y el dedo en el momento u del ciclo
+  const D = LY.inicio.demo, cel = LADO_DEMO / N, slot = i => ({ x: D.x + (i % N + .5) * cel, y: D.y + (Math.floor(i / N) + .5) * cel });
+  const sa = slot(demo.a), sb = slot(demo.b), A0 = D.a, B0 = D.b;
+  const pa = u < .8 ? A0 : u < 1.8 ? { x: lerp(A0.x, sa.x, easeInOut((u - .8) / 1)), y: lerp(A0.y, sa.y, easeInOut((u - .8) / 1)) } : sa;
+  const pb = u < 2.4 ? B0 : u < 3.4 ? { x: lerp(B0.x, sb.x, easeInOut((u - 2.4) / 1)), y: lerp(B0.y, sb.y, easeInOut((u - 2.4) / 1)) } : sb;
+  let dedo;
+  if (u < .8) { const e = easeInOut(u / .8); dedo = { x: lerp(A0.x + 120, A0.x, e), y: lerp(A0.y + 200, A0.y, e) }; }
+  else if (u < 1.8) dedo = pa;
+  else if (u < 2.4) { const e = easeInOut((u - 1.8) / .6); dedo = { x: lerp(sa.x, B0.x, e), y: lerp(sa.y, B0.y, e) }; }
+  else if (u < 3.4) dedo = pb; else dedo = sb;
+  return { pa, pb, sa, sb, dedo, tomandoA: u >= .8 && u < 1.8, tomandoB: u >= 2.4 && u < 3.4 };
+}
+function dibujarDemo(te) {
+  const D = LY.inicio.demo, ap = easeBack((te - .15) / .5); if (ap <= 0) return;
+  const t = tAhora - demo.t0, ciclo = t < 0 ? -1 : Math.floor(t / CICLO_DEMO), u = t < 0 ? 0 : t - ciclo * CICLO_DEMO;
+  if (ciclo !== demo.ciclo) { demo.ciclo = ciclo; demo.hecho = {};
+    if (ciclo > 0 && ciclo % 3 === 0) { const nd = nuevaDemo(demo); Object.assign(demo, { imagen: nd.imagen, cortes: nd.cortes, a: nd.a, b: nd.b, set: nd.set }); } }
+  const S = demo.set, cel = S.cel, P = posDemo(u), h = demo.hecho;
+  if (u >= 1.8 && !h.a) { h.a = 1; demo.pop[demo.a] = tAhora; chispas(P.sa.x, P.sa.y, 8); }
+  if (u >= 3.4 && !h.b) { h.b = 1; demo.pop[demo.b] = tAhora; chispas(P.sb.x, P.sb.y, 8); }
+  const cx = D.x + D.lado / 2, cy = D.y + D.lado / 2;
+  ctx.save(); ctx.translate(cx, cy + Math.sin(tAhora * 1.3) * 4); ctx.scale(ap, ap); ctx.translate(-cx, -cy);
+  rr(ctx, D.x - 18, D.y - 6, D.lado + 36, D.lado + 36, 28); ctx.fillStyle = 'rgba(0,40,100,.22)'; ctx.fill();
+  rr(ctx, D.x - 18, D.y - 18, D.lado + 36, D.lado + 36, 28); ctx.fillStyle = '#FFFFFF'; ctx.fill(); ctx.lineWidth = 6; ctx.strokeStyle = C.azul; ctx.stroke();
+  ctx.fillStyle = '#EAF5FB'; ctx.fillRect(D.x, D.y, D.lado, D.lado);
+  // al final del ciclo las dos piezas saltan otra vez afuera
+  const sale = u > 4.1 ? easeInOut((u - 4.1) / .45) : 0;
+  for (let i = 0; i < PIEZAS; i++) { if (i === demo.a || i === demo.b) continue; const x = D.x + (i % N + .5) * cel, y = D.y + (Math.floor(i / N) + .5) * cel;
+    dibujarPieza(S, i, x, y, 1, 0, { sombra: false, relieve: .35 }); }
+  [[demo.a, P.pa, P.sa, P.tomandoA, u >= 1.8, D.a], [demo.b, P.pb, P.sb, P.tomandoB, u >= 3.4, D.b]].forEach(([i, p, s, tomando, puesta, casa]) => {
+    let x = p.x, y = p.y; if (puesta && sale > 0) { x = lerp(s.x, casa.x, sale); y = lerp(s.y, casa.y, sale) - Math.sin(sale * Math.PI) * 80; }
+    const dp = tAhora - (demo.pop[i] ?? -9), esc = (puesta && !sale ? (dp < .4 ? 1 + Math.sin(dp / .4 * Math.PI) * .07 : 1) : tomando ? 1.05 : .85) ;
+    dibujarPieza(S, i, x, y, esc, puesta && !sale ? 0 : tomando ? 0 : .08, { relieve: puesta && !sale ? .35 : 1, sombra: !(puesta && !sale), lift: tomando ? 1 : 0,
+      borde: { a: puesta && !sale ? clamp(1 - dp / .9, 0, 1) : 0, w: 7, color: C.oro } }); });
+  ctx.restore();
+  // dedo que guía
+  if (t < 0 || u > 3.9) return;
+  const alfa = u < .2 ? u / .2 : u > 3.6 ? clamp(1 - (u - 3.6) / .3, 0, 1) : 1, apretando = P.tomandoA || P.tomandoB;
+  ctx.save(); ctx.globalAlpha = alfa * ap; ctx.translate(P.dedo.x + 26, P.dedo.y + 30); const k = apretando ? .85 : 1; ctx.scale(k, k);
+  ctx.fillStyle = 'rgba(0,30,90,.25)'; ctx.beginPath(); ctx.arc(4, 6, 36, 0, 6.29); ctx.fill();
+  ctx.fillStyle = '#FFFFFF'; ctx.strokeStyle = C.azul; ctx.lineWidth = 6; ctx.beginPath(); ctx.arc(0, 0, 32, 0, 6.29); ctx.fill(); ctx.stroke();
+  ctx.fillStyle = C.rojo; ctx.beginPath(); ctx.arc(0, 0, 12, 0, 6.29); ctx.fill(); ctx.restore();
+}
+function pantallaJuego() {
+  const L = LY.juego, te = tAhora - tEstado;
+  dibujarSombrilla(L.sombrilla); dibujarMarca(L); dibujarBebe(L.bebe, estado === 'resultado' && motivoFin !== 'victoria' ? 'triste' : null);
+  const t = L.titulo, kt = estado === 'entrada' ? easeBack((te - .1) / .45) : 1;
+  if (kt > 0 && estado !== 'resultado') { ctx.save(); ctx.translate(t.x, t.y); ctx.scale(kt, kt);
+    texto('ROMPECABEZAS', 0, 0, { fs: t.fs, color: C.rojo, borde: 14, colorBorde: '#FFFFFF', sombra: 'rgba(0,40,110,.3)', max: O === 'v' ? 900 : 600 });
+    texto(SUB, 0, L.sub.y - t.y, { fs: L.sub.fs, color: COLOR_SUB, borde: 12, colorBorde: '#FFFFFF' });
+    ctx.restore(); }
+  if (estado === 'resultado') return;
+  const kt2 = salidaEn >= 0 ? 1 - easeIn((tAhora - salidaEn) / .4) : 1;
+  ctx.save(); if (kt2 < 1) { const b = L.bandeja; ctx.globalAlpha = clamp(kt2, 0, 1); }
+  dibujarToalla(estado === 'entrada' || estado === 'vista' ? 0 : easeBack((tAhora - tMezcla) / .4) * kt2);
+  ctx.restore();
+  if (estado === 'entrada' || estado === 'vista' || (estado === 'mezcla' && tAhora - tEstado < .3)) dibujarCuenta();
+  if (tMezcla > 0 && (estado !== 'mezcla' || tAhora - tEstado > .2)) { dibujarReloj(); dibujarVidas(); dibujarMuestra(); dibujarContador(); dibujarAyuda(); }
+  dibujarTablero(); dibujarSueltas();
+}
+function dibujarTextos() {
+  for (let i = textos.length - 1; i >= 0; i--) { const t = textos[i], k = (tAhora - t.t0) / 1.1; if (k > 1) { textos.splice(i, 1); continue; } if (k < 0) continue;
+    ctx.save(); ctx.globalAlpha = k < .7 ? 1 : (1 - k) / .3; ctx.translate(t.x, t.y - easeOut(k) * 70); const e = easeBack(k / .25); ctx.scale(e, e);
+    texto(t.s, 0, 0, { fs: t.fs, color: t.color, borde: 14, colorBorde: '#FFFFFF', sombra: 'rgba(0,30,90,.3)' }); ctx.restore(); }
+  if (cartel) { const k = (tAhora - cartel.t0) / cartel.dur; if (k > 1) { cartel = null; return; } if (k < 0) return;
+    const e = k < .2 ? easeBack(k / .2) : 1, a = k > .85 ? (1 - k) / .15 : 1;
+    // el cartel nunca se sale de la pantalla: se achica hasta su máximo y se corre hacia adentro
+    const fs = cartel.fs || 112, mx = O === 'v' ? 980 : 840; ctx.font = FUENTE(700, fs); const ancho = Math.min(mx, ctx.measureText(cartel.s).width) + 30;
+    const x = clamp(cartel.x, ancho / 2 + 20, W - ancho / 2 - 20);
+    ctx.save(); ctx.globalAlpha = a; ctx.translate(x, cartel.y); ctx.rotate(-.04); ctx.scale(e, e);
+    texto(cartel.s, 0, 0, { fs, color: cartel.color, borde: 22, colorBorde: '#FFFFFF', sombra: 'rgba(0,30,90,.35)', max: mx }); ctx.restore(); }
+}
+// la imagen de la partida en el resultado: armada; si se perdió, las piezas que faltaron quedan pálidas
+function dibujarLaminaResultado(x, y, S, gano) {
+  rr(ctx, x - 14, y - 6, S + 28, S + 28, 24); ctx.fillStyle = 'rgba(0,40,100,.18)'; ctx.fill();
+  rr(ctx, x - 14, y - 14, S + 28, S + 28, 24); ctx.fillStyle = '#FFFFFF'; ctx.fill(); ctx.lineWidth = 6; ctx.strokeStyle = gano ? C.oro : C.gris; ctx.stroke();
+  if (gano) { ctx.drawImage(J.lamina, x, y, S, S); return; }
+  ctx.fillStyle = '#EAF5FB'; ctx.fillRect(x, y, S, S);
+  const k = S / J.lado, tam = J.tam * k;
+  for (let i = 0; i < PIEZAS; i++) { const ok = partida.piezas[i].colocada, px0 = x + ((i % N) * J.cel - J.m) * k, py0 = y + (Math.floor(i / N) * J.cel - J.m) * k;
+    ctx.globalAlpha = ok ? 1 : .28; ctx.drawImage(J.piezas[i].plana, px0, py0, tam, tam); ctx.globalAlpha = ok ? .35 : .5; ctx.drawImage(J.piezas[i].relieve, px0, py0, tam, tam); }
+  ctx.globalAlpha = 1;
+}
+function pantallaResultado() {
+  const P = LY.panel, te = tAhora - tEstado, gano = motivoFin === 'victoria';
+  ctx.fillStyle = `rgba(0,40,110,${.38 * clamp(te / .4, 0, 1)})`; ctx.fillRect(0, 0, W, H);
+  // la marca y el bebé quedan por encima del velo: el logo nunca cambia de color (D-022)
+  dibujarMarca(LY.juego); dibujarBebe(LY.juego.bebe, gano ? null : 'triste');
+  const k = easeBack(te / .5); if (k <= 0) return;
+  ctx.save(); ctx.translate(P.x + P.w / 2, P.y + P.h / 2); ctx.scale(k, k); ctx.translate(-P.w / 2, -P.h / 2);
+  rr(ctx, 0, 18, P.w, P.h, 60); ctx.fillStyle = 'rgba(0,25,80,.3)'; ctx.fill();
+  rr(ctx, 0, 0, P.w, P.h, 60); ctx.fillStyle = '#FFFFFF'; ctx.fill(); ctx.lineWidth = 10; ctx.strokeStyle = C.azul; ctx.stroke();
+  rr(ctx, 18, 18, P.w - 36, P.h - 36, 46); ctx.lineWidth = 4; ctx.strokeStyle = C.rojo; ctx.stroke();
+  // franja de la playa arriba del panel (en nativo, un recorte del fondo)
+  const fh = P.h * (O === 'v' ? .2 : .2);
+  ctx.save(); rr(ctx, 30, 30, P.w - 60, fh, 40); ctx.clip();
+  const sh = LY.arena - LY.mar + 260, sw = Math.min(W, sh * (P.w - 60) / fh), sy = LY.mar - 200;
+  ctx.drawImage(H_.fondo, (W - sw) / 2 * px, sy * px, sw * px, sh * px, 30, 30, P.w - 60, fh);
+  ctx.globalAlpha = .9; ctx.drawImage(H_.nube, 40 + Math.sin(tAhora * .3) * 20, 34, H_.nubeW * .4, H_.nubeH * .4); ctx.drawImage(H_.nube, P.w - 250 - Math.sin(tAhora * .25) * 20, 60, H_.nubeW * .45, H_.nubeH * .45);
+  ctx.globalAlpha = 1; ctx.restore();
+  const titulo = gano ? '¡Lo lograste!' : '¡Casi lo logras!', kt = easeBack((te - .25) / .45);
+  ctx.save(); ctx.translate(P.w / 2, 30 + fh / 2); ctx.scale(kt, kt); ctx.rotate(Math.sin(tAhora * 2) * .015);
+  texto(titulo, 0, 0, { fs: O === 'v' ? 112 : 100, color: gano ? C.rojo : C.azul, borde: 20, colorBorde: '#FFFFFF', sombra: 'rgba(0,30,90,.3)', max: P.w - 120 }); ctx.restore();
+  const usado = TIEMPO - partida.tiempo, mm = Math.floor(usado / 60), ss = String(Math.min(59, Math.round(usado % 60))).padStart(2, '0');
+  const l1 = gano ? `Armaste la imagen en ${mm}:${ss}.` : (motivoFin === 'tiempo' ? 'Se acabó el tiempo.' : 'Se acabaron las 3 oportunidades.');
+  const l2 = gano ? (partida.errores === 0 ? '¡Sin un solo error! Qué buen ojo.' : '¡Qué buen ojo tienes!') : `Colocaste ${partida.colocadas} de ${PIEZAS} piezas. ¡Inténtalo otra vez!`;
+  const y0 = 30 + fh + (O === 'v' ? 64 : 54);
+  texto(l1, P.w / 2, y0, { fs: 50, color: C.tinta, max: P.w - 120 });
+  texto(l2, P.w / 2, y0 + 64, { fs: 42, peso: 600, color: gano ? C.rojo : C.tinta, max: P.w - 120 });
+  const S = O === 'v' ? 470 : 340, ki = easeBack((te - .5) / .45);
+  if (ki > 0) { const x = (P.w - S) / 2, y = y0 + (O === 'v' ? 124 : 112);
+    ctx.save(); ctx.translate(P.w / 2, y + S / 2); ctx.scale(ki, ki); ctx.rotate(gano ? Math.sin(tAhora * 1.5) * .015 : 0); ctx.translate(-P.w / 2, -y - S / 2);
+    dibujarLaminaResultado(x, y, S, gano);
+    if (gano) { const d = ((tAhora - tEstado) % 3.2) / .9; if (d < 1) { ctx.save(); ctx.beginPath(); ctx.rect(x, y, S, S); ctx.clip(); ctx.translate(lerp(x - 200, x + S + 200, d), y + S / 2); ctx.rotate(-.5); ctx.drawImage(H_.franja, -80, -S, 160, S * 2); ctx.restore(); }
+      visto(ctx, x + S + 4, y - 4, 30); }
+    ctx.restore(); }
+  ctx.restore();
+  const bw = O === 'v' ? 600 : 560, bh = 150, bx = P.x + (P.w - bw) / 2, by = P.y + P.h - bh - (O === 'v' ? 56 : 46);
+  boton('otra', bx, by, bw, bh, 'JUGAR DE NUEVO', () => { if (tAhora - tEstado > GUARDA_RESULTADO) empezar(); }, te > GUARDA_RESULTADO, (te - .7) / .45);
+  if (tAhora - ultimaActividad > INACTIVIDAD && te > INACTIVIDAD) irAInicio();
+}
+
+/* ======================= Bucle ======================= */
+let tPrevio = 0;
+function actualizar(dt) {
+  correrAgenda();
+  if (partida && estado === 'juego') {
+    if (LG.avanzar(partida, dt)) terminar('tiempo');
+    else { const s = Math.ceil(partida.tiempo); if (partida.tiempo <= 10 && s !== ultimoTic && s > 0) { ultimoTic = s; SFX.tic(s <= 3); } }
+  }
+  if (estado === 'fin' && motivoFin === 'victoria' && Math.random() < dt * 3) confeti(6);
+  if (estado === 'resultado' && festejo && Math.random() < dt * 2) confeti(4);
+  // si dejan una partida a medias, vuelve sola al inicio (con el reloj de 60 s casi nunca llega a pasar)
+  if (estado === 'juego' && tAhora - ultimaActividad > ABANDONO) irAInicio();
+  // sonido de la playa: una ola de vez en cuando y alguna gaviota
+  if (tAhora > amb.proxOla) { amb.proxOla = tAhora + 8 + Math.random() * 7; if (estado !== 'fin') SFX.ola(); }
+  if (tAhora > amb.proxGaviota) { amb.proxGaviota = tAhora + 14 + Math.random() * 12; if (estado === 'inicio' || estado === 'juego') SFX.gaviota(); }
+  actualizarPiezas(dt); actualizarParticulas(dt);
+}
+function dibujar(dt) {
+  ctx.setTransform(px, 0, 0, px, 0, 0);
+  dibujarFondo(dt); dibujarGaviotas();
+  botones.forEach(b => b.activo = false);
+  if (estado === 'inicio') pantallaInicio();
+  else if (partida) { pantallaJuego(); if (estado === 'resultado') pantallaResultado(); }
+  dibujarParticulas(); dibujarTextos();
+}
+function cuadro(ms) {
+  const t = ms / 1000, dt = Math.min(.05, Math.max(0, t - tPrevio)); tPrevio = t; tAhora = t;
+  if (estado !== 'carga') { actualizar(dt); dibujar(dt); }
+  requestAnimationFrame(cuadro);
+}
+
+/* ======================= Escala por escenario fijo ======================= */
+function ajustar() {
+  const o = orientacionDeseada(); const cambio = o !== O || !H_.fondo;
+  O = o; LY = LAYOUTS[O]; W = LY.W; H = LY.H;
+  escala = Math.min(innerWidth / W, innerHeight / H);
+  const dpr = window.devicePixelRatio || 1; const nuevoPx = Math.min(escala * dpr, 3840 / Math.max(W, H));
+  lienzo.style.width = W * escala + 'px'; lienzo.style.height = H * escala + 'px';
+  lienzo.style.left = (innerWidth - W * escala) / 2 + 'px'; lienzo.style.top = (innerHeight - H * escala) / 2 + 'px';
+  lienzo.width = Math.round(W * nuevoPx); lienzo.height = Math.round(H * nuevoPx);
+  if ((cambio || Math.abs(nuevoPx - px) > .01) && estado !== 'carga') {
+    px = nuevoPx; hornearTodo(); prepararAmbiente();
+    // si giran la pantalla en plena partida, las piezas sueltas vuelven a su lugar de la toalla
+    if (cambio && partida && estado === 'juego') { arrastre = null; partida.tomada = -1;
+      vis.forEach(v => { if (partida.piezas[v.i].colocada) return; v.anim = null; v.bloqueada = false; v.libre = null; const h = casaDe(v.i); Object.assign(v, { x: h.x, y: h.y, esc: escBandeja(), rot: h.rot }); }); }
+  } else px = nuevoPx;
+}
+let reajuste = 0; addEventListener('resize', () => { clearTimeout(reajuste); reajuste = setTimeout(ajustar, 120); });
+document.addEventListener('visibilitychange', () => { if (!AC) return; if (document.hidden) AC.suspend(); else AC.resume(); });
+
+/* ======================= Ayudas para revisar la maqueta ======================= */
+const sePuede = () => estado === 'juego' && partida.estado === 'juego' && !arrastre && partida.tomada < 0;
+// mueve una pieza sola, como si la llevara un dedo, y la suelta sobre la casilla indicada
+function moverSola(i, celda) {
+  if (!sePuede() || i < 0 || celda < 0) return false; const v = vis[i];
+  if (v.anim || v.bloqueada || LG.tomar(partida, i).tipo !== 'tomada') return false;
+  marcarActividad(); aTope(i); SFX.tomar(); const c = LG.centroCelda(LY.juego.tablero, celda);
+  v.bloqueada = true; animar(v, c.x, c.y, 1.06, 0, .5, { arco: 50, fin: () => { v.bloqueada = false; soltarPieza(i); } }); return true;
+}
+const sueltaLibre = () => vis.findIndex(v => !partida.piezas[v.i].colocada && !v.anim && !v.bloqueada);
+const cliente = (x, y) => { const r = lienzo.getBoundingClientRect(); return { x: r.left + x * escala, y: r.top + y * escala }; };
+window.rompecabezas = {
+  colocar() { const i = sueltaLibre(); return i >= 0 && moverSola(i, i); },
+  fallar() { const i = sueltaLibre(); if (i < 0) return false; const c = partida.piezas.findIndex((p, k) => k !== i && !p.colocada); return moverSola(i, c); },
+  ganar() { const paso = () => { if (estado !== 'juego' || partida.estado !== 'juego') return; window.rompecabezas.colocar(); programar(.3, paso); }; paso(); },
+  perderTiempo() { if (estado === 'juego') partida.tiempo = .01; },
+  perderErrores() { if (estado !== 'juego') return; partida.errores = Math.max(partida.errores, ERRORES_MAX - 1); window.rompecabezas.fallar(); },
+  dejar12() { if (estado === 'juego') partida.tiempo = Math.min(partida.tiempo, 12); },
+  saltarVista() { if (estado !== 'vista' && estado !== 'entrada') return; generacion++; agenda = []; cambiarEstado('vista'); mezclar(); },
+  posPieza(i) { const v = vis[i]; return cliente(v.x, v.y); }, posCelda(k) { const c = LG.centroCelda(LY.juego.tablero, k); return cliente(c.x, c.y); },
+  sueltas() { return vis.filter(v => !partida.piezas[v.i].colocada).map(v => v.i); },
+  empezar, irAInicio, estado: () => estado, partida: () => partida,
+  audio: () => ({ contexto: AC ? AC.state : 'sin iniciar', muestras: Object.keys(MUESTRAS), musica: mus.on ? (mus.src ? 'archivo' : 'sintetizada') : 'apagada' }),
+};
+if (PARAMS.get('depurar') === '1') addEventListener('keydown', e => { const k = e.key.toLowerCase(), m = window.rompecabezas;
+  if (k === '1' || k === 'f') m.colocar(); if (k === 'e') m.fallar(); if (k === 'g') m.ganar(); if (k === 'p') m.perderTiempo(); if (k === 'r') m.perderErrores();
+  if (k === 't') m.dejar12(); if (k === 'v') m.saltarVista(); });
+
+/* ======================= Arranque ======================= */
+async function arrancar() {
+  ajustar();
+  const fuentes = Promise.all([document.fonts.load(FUENTE(700, 50)), document.fonts.load(FUENTE(600, 50))]).catch(() => {});
+  await Promise.race([Promise.all([fuentes, ...Object.keys(IMGS).map(cargarImagen)]), new Promise(r => setTimeout(r, 4000))]);
+  hornearTodo(); prepararAmbiente();
+  irAInicio();
+}
+requestAnimationFrame(cuadro);
+arrancar();
+})();
+</script>
+</body>
+</html>
